@@ -1,12 +1,14 @@
 import sys
 from dataclasses import dataclass, field
 from typing import Any
-import json
 from pathlib import Path
 
+import polars as pl
 import numpy as np
 from torch.utils.data import Dataset
 import tqdm
+import sklearn.model_selection
+import sklearn.utils
 
 
 DIR_DATA_RAW = Path("data/raw")
@@ -72,18 +74,36 @@ class DataSplit:
     metadata: Metadata
 
 
-def save_split_backup(dataset: str, idx_train, idx_dev, idx_test):
-    with open(f'datasets/split_{dataset}.json', 'w') as f:
-        json.dump({
-            'train': idx_train.tolist() if hasattr(idx_train, 'tolist') else idx_train,
-            'dev': idx_dev.tolist() if hasattr(idx_dev, 'tolist') else idx_dev,
-            'test': idx_test.tolist() if hasattr(idx_test, 'tolist') else idx_test,
-        }, f)
+def idx_split(dataset, **kwargs):
+    return sklearn.model_selection.train_test_split(
+        np.arange(len(dataset), dtype=np.int32),
+        **kwargs,
+    )
 
 
-def load_split_backup(dataset: str):
-    with open(f'datasets/split_{dataset}.json', 'r') as f:
-        return json.load(f)
+def idx_shuffle(dataset, **kwargs):
+    return sklearn.utils.shuffle(
+        np.arange(len(dataset), dtype=np.int32),
+        **kwargs,
+    )
+
+
+def load_or_create_split_parquet(split_parquet_path, splits: dict[str, np.ndarray]):
+    if split_parquet_path.exists():
+        df = pl.read_parquet(split_parquet_path)
+
+        for key in splits.keys():
+            splits[key] = df.filter(pl.col("split") == key)["idx"].to_numpy()
+    else:
+        df = pl.concat([
+            pl.DataFrame({"idx": indices, "split": name})
+            for name, indices in splits.items()
+        ])
+        df.write_parquet(split_parquet_path)
+
+        print(f"dataset shuffled, indices stored in {split_parquet_path}",
+              "(if you are trying to replicate published results,",
+              "you need to replace this file by the split published on Zenodo)")
 
 
 def progress(iterable, main=False, **kwargs):

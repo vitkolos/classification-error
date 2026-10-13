@@ -3,7 +3,6 @@ import sys
 import click
 import torch
 from torch import nn
-from torch.utils.data import Dataset
 import torchmetrics
 
 import classerr.applications
@@ -80,8 +79,8 @@ class TrainableModel(BaseModel):
 
     def fit(
         self,
-        data_train: Dataset,
-        data_dev: Dataset,
+        data_train: classerr.utils.Dataset,
+        data_dev: classerr.utils.Dataset,
     ):
         loader_train = torch.utils.data.DataLoader(data_train, batch_size=self.batch_size)
         loader_dev = torch.utils.data.DataLoader(data_dev, batch_size=self.batch_size)
@@ -106,17 +105,19 @@ class TrainableModel(BaseModel):
             self.eval()
             return self._execute_epoch(loader, train=False)
 
-    def quality(self, metric_name: str, data_test: Dataset, error_scaling: float) -> float:
+    def quality(self, metric_name: str, data_test: classerr.utils.Dataset, error_scaling: float) -> float:
         with torch.no_grad():
             self.eval()
             loader = torch.utils.data.DataLoader(data_test, batch_size=self.batch_size)
             metric_fn: torchmetrics.Metric | None = None
 
-            match metric_name.lower():
-                case 'rmse':
+            match metric_name.lower().split('/'):
+                case ['rmse']:
                     metric_fn = torchmetrics.MeanSquaredError(False)
-                case 'mae':
+                case ['mae']:
                     metric_fn = torchmetrics.MeanAbsoluteError()
+                case ['accuracy', classes]:
+                    metric_fn = torchmetrics.Accuracy(task='multiclass', num_classes=int(classes))
                 case _:
                     raise NotImplementedError(f"'{metric_name}' metric is not available")
 
@@ -153,7 +154,7 @@ class TrainableModel(BaseModel):
         metric = metric_fn.compute().item()
         return loss, metric
 
-    def subset(self, dataset: Dataset) -> Dataset:
+    def subset(self, dataset: classerr.utils.Dataset) -> classerr.utils.Dataset:
         """creates a subset of the dataset containing only items where the model is accurate enough"""
         predictions_list = []
         loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size)
