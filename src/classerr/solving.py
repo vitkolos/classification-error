@@ -41,7 +41,7 @@ class Polytope:
 @dataclasses.dataclass
 class LinearProgram(Polytope):
     objective: torch.Tensor
-    bias: float = 0.0
+    bias: torch.Tensor = dataclasses.field(default_factory=lambda: torch.tensor(0.0))
     maximize: bool = True
     neuron_states: list[torch.Tensor] | None = None  # used to characterize the polytope (not used by the solvers)
 

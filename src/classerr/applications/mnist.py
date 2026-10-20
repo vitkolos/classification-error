@@ -27,7 +27,7 @@ class MnistSplit(classerr.utils.DataSplit):
         self.dev = torch.utils.data.Subset(train_dev, splits['dev'])
         self.test = torch.utils.data.Subset(test_raw, splits['test'])
         bounds = classerr.utils.Bounds([(-0.5, 3.0)] * (28*28))
-        self.metadata = classerr.utils.Metadata(bounds=bounds)
+        self.metadata = classerr.utils.Metadata(bounds=bounds, classification=True)
 
 
 class SmallDenseNet(classerr.trainable.TrainableModel):

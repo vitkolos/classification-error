@@ -5,6 +5,7 @@ from pathlib import Path
 
 import polars as pl
 import numpy as np
+import torch
 from torch.utils.data import Dataset
 import tqdm
 import sklearn.model_selection
@@ -34,6 +35,7 @@ class Bounds:
 @dataclass
 class Metadata:
     bounds: Bounds = None  # type: ignore[assignment]
+    classification: bool = False
     scaler: Any = None
     error_scaling: float = 1.0
     sl_data: slice = field(default_factory=lambda: slice(1, None))
@@ -72,6 +74,24 @@ class DataSplit:
     dev: Dataset
     test: Dataset
     metadata: Metadata
+
+
+def get_samples(dataset: Dataset, items: str = '') -> list[tuple[int, torch.Tensor]]:
+    start, stop = 0, len(dataset)  # type: ignore[arg-type]
+
+    if ':' in items:
+        a, b = items.split(':', 2)
+        if a:
+            start = max(start, int(a))
+        if b:
+            stop = min(stop, int(b))
+    elif items:
+        # single item
+        start = int(items)
+        stop = start + 1
+
+    # clone to break connection with Storage
+    return [(i, dataset[i][0].clone(), dataset[i][1]) for i in range(start, stop)]
 
 
 def idx_split(dataset, **kwargs):

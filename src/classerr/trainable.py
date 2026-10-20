@@ -154,7 +154,7 @@ class TrainableModel(BaseModel):
         metric = metric_fn.compute().item()
         return loss, metric
 
-    def subset(self, dataset: classerr.utils.Dataset) -> classerr.utils.Dataset:
+    def subset(self, dataset: classerr.utils.Dataset, classification: bool = False) -> classerr.utils.Dataset:
         """creates a subset of the dataset containing only items where the model is accurate enough"""
         predictions_list = []
         loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size)
@@ -168,8 +168,14 @@ class TrainableModel(BaseModel):
                 predictions_list.append(self(X))
 
         predictions = torch.cat(predictions_list)
-        targets = dataset[:][1]
-        accurate_enough = (targets - predictions).abs() < 1.0
+
+        if classification:
+            targets = torch.tensor([target for point, target in dataset])
+            accurate_enough = targets == predictions.argmax(dim=1)
+        else:
+            targets = dataset[:][1]
+            accurate_enough = (targets - predictions).abs() < 1.0
+
         accurate_count = accurate_enough.sum()
         indices = torch.nonzero(accurate_enough, as_tuple=True)[0].tolist()
         removed_count = len(dataset)-accurate_count  # type: ignore[arg-type]

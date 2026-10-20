@@ -6,25 +6,25 @@ import torch.nn.functional as F
 
 @dataclass
 class Message:
-    sample: torch.Tensor
+    point: torch.Tensor
     s_weight: torch.Tensor
     s_bias: torch.Tensor
 
-    def __init__(self, sample: torch.Tensor):
-        """'sample' needs to be a single sample (not a batch)"""
-        self.sample = sample.unsqueeze(0)  # batch-like
+    def __init__(self, point: torch.Tensor):
+        """'point' needs to be a single point (not a batch)"""
+        self.point = point.unsqueeze(0)  # batch-like
         # create a unit matrix with a shape corresponding to the input
-        self.s_weight = torch.eye(sample.numel()).reshape((-1, *sample.shape))
-        self.s_bias = torch.zeros_like(self.sample)
+        self.s_weight = torch.eye(point.numel()).reshape((-1, *point.shape))
+        self.s_bias = torch.zeros_like(self.point)
 
     def apply(self, module: nn.Module):
-        self.sample = module(self.sample)
+        self.point = module(self.point)
         self.s_weight = module(self.s_weight)
         self.s_bias = module(self.s_bias)
         return self
 
     def cat(self, other: 'Message'):
-        self.sample = torch.cat((self.sample, other.sample), dim=-1)
+        self.point = torch.cat((self.point, other.point), dim=-1)
         self.s_weight = torch.cat((self.s_weight, other.s_weight), dim=-1)
         self.s_bias = torch.cat((self.s_bias, other.s_bias), dim=-1)
         return self
@@ -70,12 +70,12 @@ def collect(module: nn.Module, message: Message, constraints: Constraints) -> Me
 
 def collect_relu(relu: nn.ReLU, message: Message, constraints: Constraints) -> Message:
     # find unsaturated neurons
-    unsaturated = message.sample >= 0
-    # - non-strict inequality ensures that the unsaturated set stays the same for all the samples in the polytope
-    # - strict inequality would cause smaller unsaturated set for samples from some of the edges of the polytope
+    unsaturated = message.point >= 0
+    # - non-strict inequality ensures that the unsaturated set stays the same for all the points in the polytope
+    # - strict inequality would cause smaller unsaturated set for points from some of the edges of the polytope
     #   -> it would be possible to "move" from one polytope to another (but only in one direction)
     unsaturated_sq = unsaturated.squeeze(0)
-    message.sample = relu(message.sample)
+    message.point = relu(message.point)
 
     # add constraints
     s_weight_T = message.s_weight.movedim(0, -1)
@@ -95,7 +95,7 @@ def collect_relu(relu: nn.ReLU, message: Message, constraints: Constraints) -> M
 
 
 def collect_linear(linear: nn.Linear, message: Message, constraints: Constraints) -> Message:
-    message.sample = linear(message.sample)
+    message.point = linear(message.point)
 
     # s_weight = s_weight @ weight.t()
     message.s_weight = F.linear(message.s_weight, linear.weight, None)
@@ -112,7 +112,7 @@ def collect_batch_norm1d(batch_norm1d: nn.BatchNorm1d, message: Message, constra
     elif not batch_norm1d.track_running_stats or batch_norm1d.running_mean is None:
         raise NotImplementedError('collect_batch_norm1d does not support track_running_stats=False')
 
-    message.sample = batch_norm1d(message.sample)
+    message.point = batch_norm1d(message.point)
     message.s_weight = F.batch_norm(
         message.s_weight,
         running_mean=torch.zeros_like(batch_norm1d.running_mean),
@@ -128,7 +128,7 @@ def collect_batch_norm1d(batch_norm1d: nn.BatchNorm1d, message: Message, constra
 
 
 def collect_conv2d(conv2d: nn.Conv2d, message: Message, constraints: Constraints) -> Message:
-    message.sample = conv2d(message.sample)
+    message.point = conv2d(message.point)
     message.s_weight = conv2d._conv_forward(message.s_weight, conv2d.weight, None)
     message.s_bias = conv2d(message.s_bias)
     return message
@@ -146,9 +146,9 @@ def collect_max_pool2d(max_pool2d: nn.MaxPool2d, message: Message, constraints: 
     if max_pool2d.ceil_mode:
         raise NotImplementedError('collect_max_pool2d does not support ceil_mode=True')
 
-    _, C, M, N = message.sample.shape
-    message.sample, indices_max = F.max_pool2d(
-        message.sample,
+    _, C, M, N = message.point.shape
+    message.point, indices_max = F.max_pool2d(
+        message.point,
         max_pool2d.kernel_size,
         max_pool2d.stride,
         max_pool2d.padding,
