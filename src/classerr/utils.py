@@ -35,11 +35,15 @@ class Bounds:
 @dataclass
 class Metadata:
     bounds: Bounds = None  # type: ignore[assignment]
-    classification: bool = False
+    num_classes: int = 0  # zero for regression
     scaler: Any = None
     error_scaling: float = 1.0
     sl_data: slice = field(default_factory=lambda: slice(1, None))
     sl_target: slice = field(default_factory=lambda: slice(0, 1))
+
+    @property
+    def is_classification(self):
+        return self.num_classes > 0
 
     def fit_bounds(self, data_full: np.ndarray, padding: float = 0.05):
         data = data_full[:, self.sl_data]

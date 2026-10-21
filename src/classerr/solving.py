@@ -163,7 +163,7 @@ def solve_scipy(lp: LinearProgram, verbose: bool) -> OptimizationResult:
         raise RuntimeError('result is empty')
 
     found_x = torch.from_numpy(result.x).to(dtype=torch.get_default_dtype())
-    found_maximum = sense * result.fun + lp.bias
+    found_maximum = sense * result.fun + lp.bias.item()
     return OptimizationResult(found_x, found_maximum)
 
 
@@ -190,7 +190,7 @@ def solve_gurobi(lp: LinearProgram, verbose: bool, force_barrier: bool = False, 
 
                 if model.Status == gurobipy.GRB.OPTIMAL:
                     found_x = torch.from_numpy(x.X).to(dtype=torch.get_default_dtype())
-                    found_maximum = model.ObjVal + lp.bias
+                    found_maximum = model.ObjVal + lp.bias.item()
                     return OptimizationResult(found_x, found_maximum)
                 else:
                     raise RuntimeError(f'optimization ended with status {model.Status}')
