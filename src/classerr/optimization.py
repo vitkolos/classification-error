@@ -39,19 +39,40 @@ def find_error_maximum(
     A_ub = torch.cat([lp_orig.A_ub, lp_aprx.A_ub, A_cl])
     b_ub = torch.cat([lp_orig.b_ub, lp_aprx.b_ub, b_cl])
     results = []
-    objectives = []
 
     for k in range(metadata.num_classes):
         if k != target:
             objective, bias = objective_class_error(k, target, lp_aprx.objective, lp_aprx.bias)
-            objectives.append(objective)
+            lp = LinearProgram(metadata.bounds, A_ub, b_ub, objective, bias, maximize=True)
+            x, fun = classerr.solving.solve(lp)
+            results.append((fun, k, x))
 
-    lp = LinearProgram(metadata.bounds, A_ub, b_ub, objective=torch.empty(0))
-    results = classerr.solving.solve(lp, multiple_objectives=torch.stack(objectives))
-    # results.append((fun, k, x))
+    fun_max, k_max, x_max = max(results)
+    x_max = x_max.reshape_as(point)
+    return x_max
 
-    # fun_max, k_max, x_max = max(results)
-    # return x_max
+
+def compute_classes_mean_widths(
+    metadata: Metadata,
+    model_orig: torch.nn.Module,
+    model_aprx: torch.nn.Module,
+    point: torch.Tensor,
+    target: int,
+) -> list[float]:
+    lp_orig = lp_from_net(model_orig, metadata.bounds, point)
+    lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
+    A_cl, b_cl = constrain_class(target, lp_orig.objective, lp_orig.bias)
+    A_ub = torch.cat([lp_orig.A_ub, lp_aprx.A_ub, A_cl])
+    b_ub = torch.cat([lp_orig.b_ub, lp_aprx.b_ub, b_cl])
+    results = []
+
+    for k in range(metadata.num_classes):
+        A_cl2, b_cl2 = constrain_class(k, lp_aprx.objective, lp_aprx.bias)
+        A_ub = torch.cat([A_ub, A_cl2])
+        b_ub = torch.cat([b_ub, b_cl2])
+        polytope = Polytope(metadata.bounds, A_ub, b_ub)
+        results.append(polytope_widths(polytope).mean().item())
+
     return results
 
 
