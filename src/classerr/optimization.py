@@ -1,13 +1,10 @@
 from __future__ import annotations
-from dataclasses import dataclass
 import time
-
 import torch
-import numpy as np
 
 import classerr.neurons
 import classerr.solving
-from classerr.solving import Polytope, LinearProgram, PolytopeHashable, OptimizationResult
+from classerr.solving import Polytope, LinearProgram
 from classerr.utils import Bounds, Metadata
 
 NUM_DIRECTIONS = 100
@@ -21,23 +18,54 @@ def analyze_linear_region(
     target: int,
 ):
     start_time = time.time()
-    point_max_err = find_error_maximum(metadata, model_orig, model_aprx, point, target)
+    lp_orig = lp_from_net(model_orig, metadata.bounds, point)
+    lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
+    point_max_err = find_error_maximum(metadata, lp_orig, lp_aprx, point, target)
     print(time.time() - start_time, "seconds")
     breakpoint()
+    print('computing mean widths')
+    mean_widths = compute_classes_mean_widths(metadata, lp_orig, lp_aprx, target)
+
+
+def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
+    """'point' needs to be a single input (not a batch)"""
+    constraints = classerr.neurons.Constraints()
+    message = classerr.neurons.Message(point)
+    message = classerr.neurons.collect(net, message, constraints)
+
+    A_ub = []
+    b_ub = []
+
+    # (U)  Ax + b >= 0
+    #         -Ax <= b
+    if constraints.U_weight:
+        A_ub.append(-torch.cat(constraints.U_weight))
+        b_ub.append(torch.cat(constraints.U_bias))
+
+    # (S)  Ax + b <= 0
+    #          Ax <= -b
+    if constraints.S_weight:
+        A_ub.append(torch.cat(constraints.S_weight))
+        b_ub.append(-torch.cat(constraints.S_bias))
+
+    objective = message.s_weight
+    bias = message.s_bias
+
+    return LinearProgram(
+        bounds,
+        torch.cat(A_ub),
+        torch.cat(b_ub),
+        objective,
+        bias,
+        maximize=True,
+        neuron_states=constraints.neuron_states
+    )
 
 
 def find_error_maximum(
-    metadata: Metadata,
-    model_orig: torch.nn.Module,
-    model_aprx: torch.nn.Module,
-    point: torch.Tensor,
-    target: int,
+    metadata: Metadata, lp_orig: LinearProgram, lp_aprx: LinearProgram, point: torch.Tensor, target: int,
 ) -> torch.Tensor:
-    lp_orig = lp_from_net(model_orig, metadata.bounds, point)
-    lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
-    A_cl, b_cl = constrain_class(target, lp_orig.objective, lp_orig.bias)
-    A_ub = torch.cat([lp_orig.A_ub, lp_aprx.A_ub, A_cl])
-    b_ub = torch.cat([lp_orig.b_ub, lp_aprx.b_ub, b_cl])
+    A_ub, b_ub = correct_polytope_constraints(lp_orig, lp_aprx, target)
     results = []
 
     for k in range(metadata.num_classes):
@@ -53,58 +81,27 @@ def find_error_maximum(
 
 
 def compute_classes_mean_widths(
-    metadata: Metadata,
-    model_orig: torch.nn.Module,
-    model_aprx: torch.nn.Module,
-    point: torch.Tensor,
-    target: int,
+    metadata: Metadata, lp_orig: LinearProgram, lp_aprx: LinearProgram, target: int
 ) -> list[float]:
-    lp_orig = lp_from_net(model_orig, metadata.bounds, point)
-    lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
+    A_ub, b_ub = correct_polytope_constraints(lp_orig, lp_aprx, target)
+    widths = []
+
+    for k in range(metadata.num_classes):
+        A_cl, b_cl = constrain_class(k, lp_aprx.objective, lp_aprx.bias)
+        polytope = Polytope(metadata.bounds, torch.cat([A_ub, A_cl]), torch.cat([b_ub, b_cl]))
+        # TODO: check if polytope is not empty
+        widths.append(polytope_widths(polytope).mean().item())
+
+    return widths
+
+
+def correct_polytope_constraints(
+    lp_orig: LinearProgram, lp_aprx: LinearProgram, target: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     A_cl, b_cl = constrain_class(target, lp_orig.objective, lp_orig.bias)
     A_ub = torch.cat([lp_orig.A_ub, lp_aprx.A_ub, A_cl])
     b_ub = torch.cat([lp_orig.b_ub, lp_aprx.b_ub, b_cl])
-    results = []
-
-    for k in range(metadata.num_classes):
-        A_cl2, b_cl2 = constrain_class(k, lp_aprx.objective, lp_aprx.bias)
-        A_ub = torch.cat([A_ub, A_cl2])
-        b_ub = torch.cat([b_ub, b_cl2])
-        polytope = Polytope(metadata.bounds, A_ub, b_ub)
-        results.append(polytope_widths(polytope).mean().item())
-
-    return results
-
-
-def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
-    """'point' needs to be a single input (not a batch)"""
-    constraints = classerr.neurons.Constraints()
-    message = classerr.neurons.Message(point)
-    message = classerr.neurons.collect(net, message, constraints)
-    return lp_from_collected(message, constraints, bounds)
-
-
-def lp_from_collected(message: classerr.neurons.Message, constraints: classerr.neurons.Constraints, bounds: Bounds) -> LinearProgram:
-    TOL = 0  # 1e-8
-    A_ub = []
-    b_ub = []
-
-    # (U)  Ax + b >= 0
-    #         -Ax <= b
-    if constraints.U_weight:
-        A_ub.append(-torch.cat(constraints.U_weight))
-        b_ub.append(torch.cat(constraints.U_bias) + TOL)
-
-    # (S)  Ax + b <= 0
-    #          Ax <= -b
-    if constraints.S_weight:
-        A_ub.append(torch.cat(constraints.S_weight))
-        b_ub.append(-torch.cat(constraints.S_bias) + TOL)
-
-    objective = message.s_weight
-    bias = message.s_bias
-
-    return LinearProgram(bounds, torch.cat(A_ub), torch.cat(b_ub), objective, bias, maximize=True, neuron_states=constraints.neuron_states)
+    return A_ub, b_ub
 
 
 def constrain_class(class_dominant: int, weight: torch.Tensor, bias: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -121,7 +118,9 @@ def constrain_class(class_dominant: int, weight: torch.Tensor, bias: torch.Tenso
     return torch.stack(A_ub), torch.cat(b_ub)
 
 
-def objective_class_error(class_k: int, class_dominant: int, weight: torch.Tensor, bias: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def objective_class_error(
+    class_k: int, class_dominant: int, weight: torch.Tensor, bias: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     if class_k == class_dominant:
         raise ValueError
 
@@ -132,7 +131,9 @@ def objective_class_error(class_k: int, class_dominant: int, weight: torch.Tenso
     return weight, bias
 
 
-def polytope_widths(polytope: Polytope, num_directions: int = NUM_DIRECTIONS, cummulative_avg: bool = False, num_jobs: int = 1) -> torch.Tensor:
+def polytope_widths(
+    polytope: Polytope, num_directions: int = NUM_DIRECTIONS, cummulative_avg: bool = False, num_jobs: int = 1
+) -> torch.Tensor:
     """returns widths of the polytope computed from many random directions (or the cummulative average in each step)"""
     # variables == dimensions
     num_variables = polytope.A_ub.shape[1]
