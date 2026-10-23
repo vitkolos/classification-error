@@ -80,7 +80,11 @@ class DataSplit:
     metadata: Metadata
 
 
-def get_samples(dataset: Dataset, items: str = '') -> list[tuple[int, torch.Tensor]]:
+class AppError(Exception):
+    pass
+
+
+def get_samples(dataset: Dataset, items: str = '') -> list[tuple[int, torch.Tensor, int]]:
     start, stop = 0, len(dataset)  # type: ignore[arg-type]
 
     if ':' in items:

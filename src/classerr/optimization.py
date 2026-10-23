@@ -17,14 +17,11 @@ def analyze_linear_region(
     point: torch.Tensor,
     target: int,
 ):
-    start_time = time.time()
     lp_orig = lp_from_net(model_orig, metadata.bounds, point)
     lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
-    point_max_err = find_error_maximum(metadata, lp_orig, lp_aprx, point, target)
-    print(time.time() - start_time, "seconds")
-    breakpoint()
-    print('computing mean widths')
+    # point_max_err = find_error_maximum(metadata, lp_orig, lp_aprx, point, target)
     mean_widths = compute_classes_mean_widths(metadata, lp_orig, lp_aprx, target)
+    breakpoint()
 
 
 def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
@@ -89,8 +86,12 @@ def compute_classes_mean_widths(
     for k in range(metadata.num_classes):
         A_cl, b_cl = constrain_class(k, lp_aprx.objective, lp_aprx.bias)
         polytope = Polytope(metadata.bounds, torch.cat([A_ub, A_cl]), torch.cat([b_ub, b_cl]))
-        # TODO: check if polytope is not empty
-        widths.append(polytope_widths(polytope).mean().item())
+        mean_width = 0.0
+
+        if chebyshev_radius(polytope) > 0:  # TODO: consider adding some tolerance here
+            mean_width = polytope_widths(polytope).mean().item()
+
+        widths.append(mean_width)
 
     return widths
 
@@ -143,3 +144,37 @@ def polytope_widths(
     results = classerr.solving.solve_parallel(lp, directions, num_jobs)
     widths = torch.tensor([(res_max.fun - res_min.fun) for res_min, res_max in results])
     return widths if not cummulative_avg else widths.cumsum(dim=0) / torch.arange(1, num_directions+1)
+
+
+def chebyshev_radius(polytope: Polytope) -> float:
+    # this check is supposed to save time (it's faster to check feasibility than to find the Chebyshev center)
+    if polytope_exists(polytope):
+        A_full, b_full = polytope.get_full_constraints()
+        _, radius = chebyshev_center(A_full, b_full)
+        print("found radius", radius)
+        return radius
+    else:
+        return 0.0
+
+
+def polytope_exists(polytope: Polytope) -> bool:
+    try:
+        lp = LinearProgram(polytope.bounds, polytope.A_ub, polytope.b_ub, objective=torch.zeros(len(polytope.bounds)))
+        _ = classerr.solving.solve(lp)
+        return True
+    except classerr.solving.Infeasible:
+        return False
+
+
+def chebyshev_center(A_full: torch.Tensor, b_full: torch.Tensor) -> tuple[torch.Tensor, float]:
+    """find the Chebyshev center: https://en.wikipedia.org/w/index.php?title=Chebyshev_center&oldid=1340455583#Linear_programming_problem"""
+    num_vars = A_full.shape[1]
+    bounds = Bounds([(None, None)] * num_vars + [(0.0, None)])  # we constrain r >= 0
+    row_norms = torch.linalg.vector_norm(A_full, dim=1, keepdim=True)
+    A_ex = torch.hstack([A_full, row_norms])
+    objective = torch.tensor([0.0] * num_vars + [1.0])
+    lp = LinearProgram(bounds, A_ex, b_full, objective)
+    result = classerr.solving.solve(lp)
+    center = result.x[:-1]
+    radius = result.x[-1].item()
+    return center, radius

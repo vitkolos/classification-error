@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 import torch.nn.functional as F
+from classerr.utils import AppError
 
 
 @dataclass
@@ -60,7 +61,7 @@ def collect(module: nn.Module, message: Message, constraints: Constraints) -> Me
             return collect_max_pool2d(module, message, constraints)
         case nn.Dropout():
             if module.training:
-                raise RuntimeError('Dropout layer is in training mode')
+                raise AppError('Dropout layer is in training mode')
             return message
         case nn.Flatten():
             return message.apply(module)
@@ -108,7 +109,7 @@ def collect_linear(linear: nn.Linear, message: Message, constraints: Constraints
 
 def collect_batch_norm1d(batch_norm1d: nn.BatchNorm1d, message: Message, constraints: Constraints) -> Message:
     if batch_norm1d.training:
-        raise RuntimeError('BatchNorm1d layer is in training mode')
+        raise AppError('BatchNorm1d layer is in training mode')
     elif not batch_norm1d.track_running_stats or batch_norm1d.running_mean is None:
         raise NotImplementedError('collect_batch_norm1d does not support track_running_stats=False')
 

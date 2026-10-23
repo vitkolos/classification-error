@@ -170,7 +170,7 @@ class TrainableModel(BaseModel):
         predictions = torch.cat(predictions_list)
 
         if is_classification:
-            targets = torch.tensor([target for point, target in dataset])
+            targets = torch.tensor([target for point, target in dataset])  # type: ignore[attr-defined]
             accurate_enough = targets == predictions.argmax(dim=1)
         else:
             targets = dataset[:][1]

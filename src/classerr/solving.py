@@ -9,7 +9,7 @@ import scipy.optimize
 import gurobipy
 import joblib
 
-from classerr.utils import Bounds, progress
+from classerr.utils import Bounds, progress, AppError
 
 
 @dataclasses.dataclass
@@ -18,23 +18,25 @@ class Polytope:
     A_ub: torch.Tensor
     b_ub: torch.Tensor
 
-    def get_full_constraints(self) -> tuple[np.ndarray, np.ndarray]:
-        I = np.eye(len(self.bounds))
-        A_matrices = [self.A_ub.numpy()]
-        b_vectors = [self.b_ub.numpy()]
+    def get_full_constraints(self) -> tuple[torch.Tensor, torch.Tensor]:
+        eye = torch.eye(len(self.bounds))
+        A_matrices = [self.A_ub]
+        b_vectors = [self.b_ub]
 
-        valid_lb = np.isfinite(self.bounds.lb)
-        if np.any(valid_lb):
-            A_matrices.append(-I[valid_lb])
-            b_vectors.append(-self.bounds.lb[valid_lb])
+        lb = torch.as_tensor(self.bounds.lb)
+        valid_lb = torch.isfinite(lb)
+        if torch.any(valid_lb):
+            A_matrices.append(-eye[valid_lb])
+            b_vectors.append(-lb[valid_lb])
 
-        valid_ub = np.isfinite(self.bounds.ub)
-        if np.any(valid_ub):
-            A_matrices.append(I[valid_ub])
-            b_vectors.append(self.bounds.ub[valid_ub])
+        ub = torch.as_tensor(self.bounds.ub)
+        valid_ub = torch.isfinite(ub)
+        if torch.any(valid_ub):
+            A_matrices.append(eye[valid_ub])
+            b_vectors.append(ub[valid_ub])
 
-        A_full = np.vstack(A_matrices)
-        b_full = np.concatenate(b_vectors)
+        A_full = torch.cat(A_matrices)
+        b_full = torch.cat(b_vectors)
         return A_full, b_full
 
 
@@ -47,7 +49,7 @@ class LinearProgram(Polytope):
 
     def to_polytope_hashable(self) -> 'PolytopeHashable':
         if self.neuron_states is None:
-            raise RuntimeError('neuron_states not available')
+            raise AppError('neuron_states not available')
 
         return PolytopeHashable(self.neuron_states)
 
@@ -69,6 +71,14 @@ class PolytopeHashable:
 class OptimizationResult(NamedTuple):
     x: torch.Tensor
     fun: float
+
+
+class SolverError(AppError):
+    pass
+
+
+class Infeasible(SolverError):
+    pass
 
 
 MultipleResults = list[tuple[OptimizationResult, OptimizationResult]]
@@ -107,6 +117,7 @@ def solve(lp: LinearProgram, solver: str = '', verbose: bool = False,
 
 
 def solve(lp: LinearProgram, solver: str = '', verbose: bool = False, multiple_objectives: torch.Tensor | None = None) -> OptimizationResult | MultipleResults:
+    """should raise Infeasible for infeasible instances"""
     solver = solver if solver else _active_solver.get()  # in lowercase
 
     if solver == 'gurobi' or solver == 'gurobi-barrier':
@@ -115,6 +126,7 @@ def solve(lp: LinearProgram, solver: str = '', verbose: bool = False, multiple_o
     def solve_single(lp: LinearProgram) -> OptimizationResult:
         match solver:
             case 'highs': return solve_scipy(lp, verbose)
+            case _: raise NotImplementedError
 
     if multiple_objectives is not None:
         lps = (get_min_max_lps(lp, objective) for objective in progress(multiple_objectives))
@@ -154,13 +166,13 @@ def solve_scipy(lp: LinearProgram, verbose: bool) -> OptimizationResult:
     if not result.success:
         match result.status:
             case 2:
-                raise RuntimeError('optimization failed, problem infeasible (check if the bounds are set correctly)')
+                raise Infeasible
             case 3:
-                raise RuntimeError('optimization failed, problem unbounded (check if the bounds are set correctly)')
+                raise SolverError('optimization failed, problem unbounded (check if the bounds are set correctly)')
             case _:
-                raise RuntimeError('optimization failed')
+                raise SolverError('optimization failed')
     elif result.x is None or result.fun is None:
-        raise RuntimeError('result is empty')
+        raise AppError('result is empty')
 
     found_x = torch.from_numpy(result.x).to(dtype=torch.get_default_dtype())
     found_maximum = sense * result.fun + lp.bias.item()
@@ -188,12 +200,15 @@ def solve_gurobi(lp: LinearProgram, verbose: bool, force_barrier: bool = False, 
                 model.setObjective(objective.numpy() @ x, sense)
                 model.optimize()
 
-                if model.Status == gurobipy.GRB.OPTIMAL:
-                    found_x = torch.from_numpy(x.X).to(dtype=torch.get_default_dtype())
-                    found_maximum = model.ObjVal + lp.bias.item()
-                    return OptimizationResult(found_x, found_maximum)
-                else:
-                    raise RuntimeError(f'optimization ended with status {model.Status}')
+                match model.Status:
+                    case gurobipy.GRB.OPTIMAL:
+                        found_x = torch.from_numpy(x.X).to(dtype=torch.get_default_dtype())
+                        found_maximum = model.ObjVal + lp.bias.item()
+                        return OptimizationResult(found_x, found_maximum)
+                    case gurobipy.GRB.INFEASIBLE:
+                        raise Infeasible
+
+                raise SolverError(f'optimization ended with status {model.Status}')
 
             if multiple_objectives is not None:
                 return [(optimize(o, maximize=False), optimize(o, maximize=True)) for o in progress(multiple_objectives)]
