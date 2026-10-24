@@ -3,8 +3,9 @@ import joblib
 
 import classerr.applications
 import classerr.optimization
-import classerr.utils
 import classerr.solving
+import classerr.tree
+import classerr.utils
 
 
 @click.command()
@@ -39,9 +40,13 @@ def main(experiment, dataset, run_name, reduction, bits, solver, items, jobs):
 
                 if experiment == 'single':
                     i, point, target = samples_test[0]
-                    results = classerr.optimization.analyze_linear_region(
-                        data_split.metadata, model_orig.layers, model_aprx.layers, point, target)
-                    print(results)
+                    # results = classerr.optimization.analyze_linear_region(
+                    #     data_split.metadata, model_orig.layers, model_aprx.layers, point, target)
+                    # print(results)
+                    breakpoint()
+
+            case 'tree':
+                classerr.tree.build_tree(model_orig, data_split.dev)
 
 
 if __name__ == '__main__':

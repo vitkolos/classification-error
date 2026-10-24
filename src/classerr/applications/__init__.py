@@ -9,7 +9,7 @@ import classerr.utils
 class DataBundle:
     def __init__(self, dataset: str):
         dataset = dataset.lower()
-        self.model_class: type[classerr.trainable.BaseModel]
+        self.model_class: type[classerr.trainable.TrainableModel]
         self.data_split: classerr.utils.DataSplit
 
         classerr.utils.DIR_DATA_RAW.mkdir(parents=True, exist_ok=True)
@@ -32,7 +32,7 @@ class DataBundle:
         with open(classerr.utils.DIR_DATA_PROCESSED / f'{dataset}_metadata.json', 'w') as file_json:
             json.dump(self.data_split.metadata.to_dict(), file_json)
 
-    def load_model(self) -> torch.nn.Module:
+    def load_model(self) -> classerr.trainable.TrainableModel:
         model = self.model_class()
         model.load(self.model_file).eval()
         return model
