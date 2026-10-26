@@ -179,3 +179,30 @@ def chebyshev_center(A_full: torch.Tensor, b_full: torch.Tensor) -> tuple[torch.
     center = result.x[:-1]
     radius = result.x[-1].item()
     return center, radius
+
+
+def assert_inside_polytope(point: torch.Tensor, polytope: Polytope, abs_tol: float = 1e-6):
+    problems = []
+    point_flat = point.flatten()
+
+    if len(polytope.bounds.seq) != point.numel():
+        raise ValueError(
+            f'{len(polytope.bounds.seq)} bounds were provided, but there are {point.numel()} input neurons')
+
+    too_low = torch.nonzero(point_flat < torch.from_numpy(polytope.bounds.lb)).flatten().tolist()
+    too_high = torch.nonzero(point_flat > torch.from_numpy(polytope.bounds.ub)).flatten().tolist()
+
+    if too_low:
+        problems.append(f'indices {too_low} < lower bounds')
+
+    if too_high:
+        problems.append(f'indices {too_high} > upper bounds')
+
+    left_side = polytope.A_ub @ point_flat
+    infeasible_rows = torch.nonzero(left_side > polytope.b_ub + abs_tol).flatten()
+
+    for i in infeasible_rows:
+        problems.append(f'violated constraint {i}: {left_side[i].item():.6f} <= {polytope.b_ub[i].item():.6f}')
+
+    if problems:
+        raise AssertionError(f"point is outside the polytope, reasons:\n{'\n'.join(problems)}\ninput tensor:\n{point}")

@@ -5,7 +5,6 @@ import torch
 from torch import nn
 import torchmetrics
 
-import classerr.applications
 import classerr.quantization
 import classerr.utils
 
@@ -13,6 +12,7 @@ import classerr.utils
 @click.command()
 @click.argument('dataset')
 def main(dataset):
+    import classerr.applications
     bundle = classerr.applications.DataBundle(dataset)
     data_split = bundle.data_split
     model = bundle.model_class()
