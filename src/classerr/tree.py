@@ -2,12 +2,13 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+import classerr.trainable
 import classerr.utils
 from classerr.utils import len_ds
 
 
 class BuildingNode:
-    def __init__(self, dataset: classerr.utils.Dataset, model: torch.nn.Sequential, data_idx: list[int]):
+    def __init__(self, dataset: classerr.utils.Dataset, model: classerr.trainable.TrainableModel, data_idx: list[int]):
         self.dataset = dataset
         self.model = model
         self.data_idx = data_idx
@@ -23,13 +24,15 @@ class BuildingNode:
         self.left: BuildingNode | None = None
         self.right: BuildingNode | None = None
 
+    @torch.no_grad()
     def build(self):
         # 1. compute num_saturated
+        self.compute_saturations()
         # 2. reduce (as long as there are reducible hidden neurons in the first layer)
         # 3. if there's at least one hidden neuron, we branch:
         # 4. find the branching neuron, extract its affine projection (shortcut weights)
         # 5. create children + split data_idx and assign them to the children according to the decision criterion
-        ...
+        breakpoint()
 
     def compute_saturations(self):
         for s in self.num_saturated:
@@ -38,20 +41,20 @@ class BuildingNode:
         loader = torch.utils.data.DataLoader(self.dataset, batch_size=self.model.batch_size)
 
         for points, _ in loader:
-            self.forward(points)
+            self.forward_count(points)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def forward_count(self, inputs: torch.Tensor) -> torch.Tensor:
         xs = inputs
         i = 0
 
-        for j, module in enumerate(self.model):
+        for j, module in enumerate(self.model.layers):
             match module:
                 case nn.ReLU():
-                    xs = self.apply_linearity(i, xs, inputs, self.model[:j] if i == 0 else None)
-                    xs = self.apply_relu(i, xs)
+                    xs = self.apply_linearity(i, xs, inputs, modules=(self.model.layers[:j] if i == 0 else None))
+                    self.count_saturations(i, xs)
                     i += 1
-                case _:
-                    xs = module(xs)
+
+            xs = module(xs)
 
         # last layer
         xs = self.apply_linearity(i, xs, inputs)
@@ -61,28 +64,38 @@ class BuildingNode:
         self, i: int, xs: torch.Tensor, inputs: torch.Tensor, modules: nn.Sequential | None = None
     ) -> torch.Tensor:
         if i == len(self.prev_mask):
-            single_input_shape = torch.Size(1, *inputs.shape[1:])
-            single_output_shape = torch.Size(1, *xs.shape[1:])
-            self.prev_mask.append(torch.ones(single_output_shape, dtype=bool))
-            self.input_weight.append(torch.zeros((single_output_shape.numel(), single_input_shape.numel())))
-            self.input_bias.append(torch.zeros(single_output_shape.numel()))
+            single_input_shape = torch.Size((1, *inputs.shape[1:]))
+            single_output_shape = torch.Size((1, *xs.shape[1:]))
+            w_shape = (single_output_shape.numel(), single_input_shape.numel())
+            b_shape = (single_output_shape.numel(),)
+            self.prev_mask.append(torch.ones(single_output_shape, dtype=torch.bool))
+            self.input_weight.append(torch.zeros(w_shape))
+            self.input_bias.append(torch.zeros(b_shape))
 
             if i == 0:
                 assert modules is not None
                 self.prev_mask[0].zero_()
                 self.input_bias[0] = modules(torch.zeros(single_input_shape))
-                eye = torch.eye(single_input_shape.numel()).reshape((-1, *xs.shape[1:]))
+                eye = torch.eye(single_input_shape.numel()).reshape((-1, *single_input_shape[1:]))
                 self.input_weight[0] = modules(eye) - self.input_bias[0]
+                # reshape
+                self.input_weight[0] = self.input_weight[0].reshape(w_shape)
+                self.input_bias[0] = self.input_bias[0].reshape(b_shape)
+
+                # FIXME: self.input_weight[0] differs from self.model.layers[0].weight (for california)
 
         xs *= self.prev_mask[i]
         xs += F.linear(inputs.flatten(1), self.input_weight[i], self.input_bias[i]).reshape(xs.shape)
+        return xs
 
-    def apply_relu(self, i: int, xs: torch.Tensor) -> torch.Tensor:
-        ...
+    def count_saturations(self, i: int, xs: torch.Tensor) -> torch.Tensor:
+        if i == len(self.num_saturated):
+            self.num_saturated.append(torch.zeros_like(xs, dtype=torch.int))
+
+        self.num_saturated[i] += (xs < 0).sum(dim=0)
+        # FIXME
 
 
-def build_tree(model: torch.nn.Sequential, dataset: classerr.utils.Dataset):
-    assert model is torch.nn.Sequential
-    root = BuildingNode(model, list(range(len_ds(dataset))))
-
+def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset):
+    root = BuildingNode(dataset, model, list(range(len_ds(dataset))))
     root.build()
