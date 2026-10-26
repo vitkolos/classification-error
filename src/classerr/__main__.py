@@ -40,10 +40,9 @@ def main(experiment, dataset, run_name, reduction, bits, solver, items, jobs):
 
                 if experiment == 'single':
                     i, point, target = samples_test[0]
-                    # results = classerr.optimization.analyze_linear_region(
-                    #     data_split.metadata, model_orig.layers, model_aprx.layers, point, target)
-                    # print(results)
-                    breakpoint()
+                    results = classerr.optimization.analyze_linear_region(
+                        data_split.metadata, model_orig.layers, model_aprx.layers, point, target)
+                    print(results)
 
             case 'tree':
                 classerr.tree.build_tree(model_orig, data_split.dev)

@@ -49,16 +49,19 @@ def collect(module: nn.Module, message: Message, constraints: Constraints) -> Me
             for submodule in module:
                 message = collect(submodule, message, constraints)
             return message
-        case nn.ReLU():
-            return collect_relu(module, message, constraints)
+        # linear projection
         case nn.Linear():
             return collect_linear(module, message, constraints)
         case nn.BatchNorm1d():
             return collect_batch_norm1d(module, message, constraints)
         case nn.Conv2d():
             return collect_conv2d(module, message, constraints)
+        # activation
+        case nn.ReLU():
+            return collect_relu(module, message, constraints)
         case nn.MaxPool2d():
             return collect_max_pool2d(module, message, constraints)
+        # other
         case nn.Dropout():
             if module.training:
                 raise AppError('Dropout layer is in training mode')
@@ -69,33 +72,18 @@ def collect(module: nn.Module, message: Message, constraints: Constraints) -> Me
     raise NotImplementedError(f"neurons.collect is not implemented for '{type(module).__name__}' object")
 
 
-def collect_relu(relu: nn.ReLU, message: Message, constraints: Constraints) -> Message:
-    # find unsaturated neurons
-    unsaturated = message.point >= 0
-    # - non-strict inequality ensures that the unsaturated set stays the same for all the points in the polytope
-    # - strict inequality would cause smaller unsaturated set for points from some of the edges of the polytope
-    #   -> it would be possible to "move" from one polytope to another (but only in one direction)
-    unsaturated_sq = unsaturated.squeeze(0)
-    message.point = relu(message.point)
-
-    # add constraints
-    s_weight_T = message.s_weight.movedim(0, -1)
-    constraints.U_weight.append(s_weight_T[unsaturated_sq])
-    constraints.U_bias.append(message.s_bias[unsaturated])
-    constraints.S_weight.append(s_weight_T[~unsaturated_sq])
-    constraints.S_bias.append(message.s_bias[~unsaturated])
-
-    # disable saturated neurons
-    message.s_weight *= unsaturated
-    message.s_bias *= unsaturated
-
-    # log states of neurons
-    constraints.neuron_states.append(unsaturated_sq)
-
+def collect_linear_projection(module: nn.Module, message: Message, constraints: Constraints) -> Message:
+    """generic implementation of *collect* for any layer performing linear projection
+    (linear, convolutional, batch normalization layers, etc.)"""
+    message.point = module(message.point)
+    # apply projection without bias
+    message.s_weight = module(message.s_weight) - module(torch.zeros_like(message.s_bias))
+    message.s_bias = module(message.s_bias)
     return message
 
 
 def collect_linear(linear: nn.Linear, message: Message, constraints: Constraints) -> Message:
+    """specific implementation of *collect* for nn.Linear (even though collect_linear_projection could be used)"""
     message.point = linear(message.point)
 
     # s_weight = s_weight @ weight.t()
@@ -135,12 +123,30 @@ def collect_conv2d(conv2d: nn.Conv2d, message: Message, constraints: Constraints
     return message
 
 
-def batch_channels_take(data: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-    batch_size = data.shape[0]
-    channels = data.shape[1]
-    batch_indices = indices.flatten(2).expand(batch_size, -1, -1)
-    gathered = torch.gather(data.flatten(2), dim=2, index=batch_indices)
-    return gathered.reshape(batch_size, channels, *indices.shape[2:])
+def collect_relu(relu: nn.ReLU, message: Message, constraints: Constraints) -> Message:
+    # find unsaturated neurons
+    unsaturated = message.point >= 0
+    # - non-strict inequality ensures that the unsaturated set stays the same for all the points in the polytope
+    # - strict inequality would cause smaller unsaturated set for points from some of the edges of the polytope
+    #   -> it would be possible to "move" from one polytope to another (but only in one direction)
+    unsaturated_sq = unsaturated.squeeze(0)
+    message.point = relu(message.point)
+
+    # add constraints
+    s_weight_T = message.s_weight.movedim(0, -1)
+    constraints.U_weight.append(s_weight_T[unsaturated_sq])
+    constraints.U_bias.append(message.s_bias[unsaturated])
+    constraints.S_weight.append(s_weight_T[~unsaturated_sq])
+    constraints.S_bias.append(message.s_bias[~unsaturated])
+
+    # disable saturated neurons
+    message.s_weight *= unsaturated
+    message.s_bias *= unsaturated
+
+    # log states of neurons
+    constraints.neuron_states.append(unsaturated_sq)
+
+    return message
 
 
 def collect_max_pool2d(max_pool2d: nn.MaxPool2d, message: Message, constraints: Constraints) -> Message:
@@ -193,3 +199,11 @@ def collect_max_pool2d(max_pool2d: nn.MaxPool2d, message: Message, constraints: 
     constraints.neuron_states.append(indices_max)
 
     return message
+
+
+def batch_channels_take(data: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    batch_size = data.shape[0]
+    channels = data.shape[1]
+    batch_indices = indices.flatten(2).expand(batch_size, -1, -1)
+    gathered = torch.gather(data.flatten(2), dim=2, index=batch_indices)
+    return gathered.reshape(batch_size, channels, *indices.shape[2:])

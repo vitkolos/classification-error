@@ -19,6 +19,7 @@ def analyze_linear_region(
 ):
     lp_orig = lp_from_net(model_orig, metadata.bounds, point)
     lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
+    breakpoint()
     # point_max_err = find_error_maximum(metadata, lp_orig, lp_aprx, point, target)
     mean_widths = compute_classes_mean_widths(metadata, lp_orig, lp_aprx, target)
     breakpoint()
