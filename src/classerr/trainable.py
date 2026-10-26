@@ -1,4 +1,5 @@
 import sys
+import typing
 
 import click
 import torch
@@ -7,6 +8,7 @@ import torchmetrics
 
 import classerr.quantization
 import classerr.utils
+from classerr.utils import len_ds
 
 
 @click.command()
@@ -54,9 +56,11 @@ class BaseModel(nn.Module):
 
 
 class TrainableModel(BaseModel):
-    def __init__(self, layers: nn.Sequential):
+    def __init__(self, layers: nn.Sequential | None = None):
         super().__init__()
-        self.layers = layers
+
+        if layers is not None:
+            self.layers = layers
 
     def forward(self, x):
         return self.layers(x)
@@ -170,7 +174,7 @@ class TrainableModel(BaseModel):
         predictions = torch.cat(predictions_list)
 
         if is_classification:
-            targets = torch.tensor([target for point, target in dataset])  # type: ignore[attr-defined]
+            targets = torch.tensor([dataset[i][1] for i in range(len_ds(dataset))])
             accurate_enough = targets == predictions.argmax(dim=1)
         else:
             targets = dataset[:][1]
@@ -178,10 +182,11 @@ class TrainableModel(BaseModel):
 
         accurate_count = accurate_enough.sum()
         indices = torch.nonzero(accurate_enough, as_tuple=True)[0].tolist()
-        removed_count = len(dataset)-accurate_count  # type: ignore[arg-type]
+        removed_count = len_ds(dataset)-accurate_count
         print(
             f'subset contains only {accurate_count} data points ({removed_count} removed, model was too inaccurate)', file=sys.stderr)
-        return torch.utils.data.Subset(dataset, indices)
+        subset = torch.utils.data.Subset(dataset, indices)
+        return typing.cast(classerr.utils.Dataset, subset)
 
 
 def init_weights(module: nn.Module):

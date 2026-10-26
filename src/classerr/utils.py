@@ -84,8 +84,12 @@ class AppError(Exception):
     pass
 
 
+def len_ds(dataset: Dataset):
+    return len(dataset)  # type: ignore[arg-type]
+
+
 def get_samples(dataset: Dataset, items: str = '') -> list[tuple[int, torch.Tensor, int]]:
-    start, stop = 0, len(dataset)  # type: ignore[arg-type]
+    start, stop = 0, len_ds(dataset)
 
     if ':' in items:
         a, b = items.split(':', 2)
