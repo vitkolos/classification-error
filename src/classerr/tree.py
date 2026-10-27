@@ -24,11 +24,16 @@ class BuildingNode:
         self.left: BuildingNode | None = None
         self.right: BuildingNode | None = None
 
+    @property
+    def num_hidden_layers(self):
+        return len(self.num_saturated)
+
     @torch.no_grad()
     def build(self):
         # 1. compute num_saturated
         self.compute_saturations()
         # 2. reduce (as long as there are reducible hidden neurons in the first layer)
+        # TODO: self.reduce()
         # 3. if there's at least one hidden neuron, we branch:
         # 4. find the branching neuron, extract its affine projection (shortcut weights)
         # 5. create children + split data_idx and assign them to the children according to the decision criterion
@@ -91,6 +96,16 @@ class BuildingNode:
             self.num_saturated.append(torch.zeros(xs.shape[1:], dtype=torch.int))
 
         self.num_saturated[i] += (xs < 0).sum(dim=0)
+
+    def neurons_first_hidden(self) -> list:
+        neurons = []
+
+        for i in range(self.num_hidden_layers):
+            if (self.input_weight[i].any() or self.input_bias[i].any()) and not self.prev_mask[i].all():
+                for j in range(self.input_bias[i].numel()):
+                    ...
+
+        return neurons
 
 
 def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset):
