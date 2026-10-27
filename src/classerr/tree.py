@@ -75,14 +75,12 @@ class BuildingNode:
             if i == 0:
                 assert modules is not None
                 self.prev_mask[0].zero_()
-                self.input_bias[0] = modules(torch.zeros(single_input_shape))
+                bias = modules(torch.zeros(single_input_shape))
                 eye = torch.eye(single_input_shape.numel()).reshape((-1, *single_input_shape[1:]))
-                self.input_weight[0] = modules(eye) - self.input_bias[0]
-                # reshape
-                self.input_weight[0] = self.input_weight[0].reshape(w_shape)
-                self.input_bias[0] = self.input_bias[0].reshape(b_shape)
-
-                # FIXME: self.input_weight[0] differs from self.model.layers[0].weight (for california)
+                weight = modules(eye) - bias
+                # reshape and add
+                self.input_weight[0] += weight.movedim(0, -1).reshape(w_shape)
+                self.input_bias[0] += bias.reshape(b_shape)
 
         xs *= self.prev_mask[i]
         xs += F.linear(inputs.flatten(1), self.input_weight[i], self.input_bias[i]).reshape(xs.shape)
@@ -90,10 +88,9 @@ class BuildingNode:
 
     def count_saturations(self, i: int, xs: torch.Tensor) -> torch.Tensor:
         if i == len(self.num_saturated):
-            self.num_saturated.append(torch.zeros_like(xs, dtype=torch.int))
+            self.num_saturated.append(torch.zeros(xs.shape[1:], dtype=torch.int))
 
         self.num_saturated[i] += (xs < 0).sum(dim=0)
-        # FIXME
 
 
 def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset):
