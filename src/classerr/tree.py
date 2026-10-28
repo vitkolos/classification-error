@@ -170,6 +170,7 @@ class BuildingNode:
             zero_vectors = torch.zeros(len(idx_linear), *self.prev_mask[i+1].shape[1:])
             unit_vectors = zero_vectors.clone()
             unit_vectors[coords_linear] = 1
+            # FIXME: list index out of range??? (below)
             coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vectors)  # w[j,k]
             weight = self.input_weight[i][idx_linear]  # w[j,i]
             # for every disabled neuron j, for every input neuron i, for every successor k: w_ki += w_kj * w_ji
@@ -195,8 +196,33 @@ class BuildingNode:
                     neurons_indices = neurons_mask.nonzero(as_tuple=True)[0]
                     neurons.append((i, neurons_indices))
                 else:
+                    breakpoint()
                     # otherwise, we need to check which neurons are not connected to the previous layers anymore
-                    raise NotImplementedError
+                    def transform_fn(x):
+                        return self.linear_seqs[i](x * self.prev_mask[i])
+
+                    zeros = torch.zeros(self.prev_mask[i].shape)
+                    bias, vjp_fn = torch.func.vjp(transform_fn, zeros)
+                    diff_total = torch.zeros_like(bias)
+
+                    for _ in range(3):
+                        rand_input = torch.randn(self.prev_mask[i].shape)
+                        diff_total += torch.abs(transform_fn(rand_input) - bias)
+
+                    EPS1 = 1e-6
+                    likely_disconnected = diff_total < EPS1
+                    sus_indices_flat = likely_disconnected.flatten().nonzero(as_tuple=True)[0]
+                    N = len(sus_indices_flat)
+                    unit_vectors = torch.zeros(N, bias.numel())
+                    unit_vectors[torch.arange(N), sus_indices_flat] = 1
+                    unit_vectors = unit_vectors.reshape(N, *bias.shape)
+                    grads = torch.func.vmap(vjp_fn)(unit_vectors)[0]
+                    EPS2 = 1e-8
+                    disconnected_mask = (torch.abs(grads) < EPS2).flatten(1).any(dim=1)
+                    disconnected_indices = disconnected_mask.nonzero(as_tuple=True)[0]
+
+                    if disconnected_indices.numel() > 0:
+                        neurons.append((i, disconnected_indices))
             else:
                 # input weights and biases are blank
                 # which means that all neurons in this layer have been reduced (and disabled)
