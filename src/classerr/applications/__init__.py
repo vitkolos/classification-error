@@ -18,8 +18,8 @@ class DataBundle:
 
         match dataset:
             case 'mnist':
-                self.model_file = classerr.utils.DIR_MODELS / "mnist_dense_net.pt"
-                self.model_class = mnist.SmallDenseNet
+                self.model_file = classerr.utils.DIR_MODELS / "mnist_conv_net.pt"
+                self.model_class = mnist.SmallConvNet
                 self.data_split = mnist.MnistSplit()
             case 'california':
                 self.model_file = classerr.utils.DIR_MODELS / "california_mlp.pt"

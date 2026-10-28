@@ -52,3 +52,30 @@ class SmallDenseNet(classerr.trainable.TrainableModel):
 
     def callback_stopping(self, epoch, metric_dev):
         return metric_dev > 0.98
+
+
+class SmallConvNet(classerr.trainable.TrainableModel):
+    def __init__(self):
+        super().__init__(
+            nn.Sequential(
+                nn.Conv2d(1, 32, kernel_size=3, padding=1),  # output: 32 x 28 x 28
+                nn.ReLU(),
+                nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),  # output: 64 x 28 x 28
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),  # output: 64 x 14 x 14
+
+                nn.Flatten(),  # requires a batch
+                nn.Dropout(0.8),
+                nn.Linear(12544, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, 10)
+            )
+        )
+        self.configure(
+            loss_fn=torch.nn.CrossEntropyLoss(),
+            optimizer=torch.optim.Adam(self.parameters(), lr=0.001),
+            metric_fn=torchmetrics.Accuracy('multiclass', num_classes=10),
+        )
+
+    def callback_stopping(self, epoch, metric_dev):
+        return metric_dev > 0.99
