@@ -45,6 +45,7 @@ class BuildingNode:
 
     @property
     def num_hidden_layers(self):
+        """number of hidden layers before reduction"""
         return len(self.num_saturated)
 
     def num_neurons_in_layer(self, i: int):
@@ -54,8 +55,8 @@ class BuildingNode:
     def build(self):
         # compute num_saturated
         self.compute_saturations()
-        # reduce (as long as there are reducible hidden neurons in the first layer)
-        neurons_first_hidden = self.reduce()  # TODO
+        # reduce (as long as there are reducible neurons in the first hidden layer)
+        neurons_first_hidden = self.reduce()
 
         # if there's at least one hidden neuron, we branch:
         if len(neurons_first_hidden) > 0:
@@ -87,6 +88,7 @@ class BuildingNode:
                     self.increment_saturation_counters(i, xs)
                     xs = module(xs)
                     i += 1
+                    last_nonlinearity = j
                     xs = self.disable_connections(i, xs)
                 case _:
                     xs = module(xs)
@@ -138,15 +140,51 @@ class BuildingNode:
         self.num_saturated[i] += (xs < 0).sum(dim=0)
 
     def reduce(self) -> Neurons:
-        """generates and modifies (not necessarily reduces) a list of hidden neurons"""
-        # TODO
-        breakpoint()
-        return self.find_neurons_first_hidden()
+        """returns a list of neurons in the first hidden layer (after reduction)"""
+        neurons_first_hidden = self.find_neurons_first_hidden(range(self.num_hidden_layers))
+        data_len = torch.tensor(len(self.data_idx))
+        any_reducible = False
 
-    def find_neurons_first_hidden(self) -> Neurons:
+        for i, neurons_indices in neurons_first_hidden:
+            num_saturated = self.num_saturated[i].flatten()[neurons_indices]
+            linear = (num_saturated == 0)
+            dead = (num_saturated == data_len)
+            reducible = linear | dead
+            layer_reducible = reducible.any()
+            any_reducible |= layer_reducible
+
+            if layer_reducible:
+                self.reduce_layer(i, neurons_indices[linear], neurons_indices[dead])
+
+        if any_reducible:
+            # we reduced some neurons
+            # we need to check again (for simplicity, we start all over again)
+            return self.reduce()
+        else:
+            # no reduction was performed in this run, this is the final list
+            return neurons_first_hidden
+
+    def reduce_layer(self, i: int, idx_linear: torch.Tensor, idx_dead: torch.Tensor):
+        if idx_linear.numel() > 0:
+            coords_linear = torch.unravel_index(idx_linear, self.prev_mask[i+1].shape)
+            zero_vectors = torch.zeros(len(idx_linear), *self.prev_mask[i+1].shape[1:])
+            unit_vectors = zero_vectors.clone()
+            unit_vectors[coords_linear] = 1
+            coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vectors)  # w[j,k]
+            weight = self.input_weight[i][idx_linear]  # w[j,i]
+            # for every disabled neuron j, for every input neuron i, for every successor k: w_ki += w_kj * w_ji
+            self.input_weight[i+1] += torch.einsum('jk,ji->ki', coeffs, weight)
+
+        for idx in [idx_linear, idx_dead]:
+            self.input_weight[i][idx] = 0
+            self.input_bias[i][idx] = 0
+            coords = torch.unravel_index(idx, self.prev_mask[i+1].shape)
+            self.prev_mask[i+1][coords] = 0
+
+    def find_neurons_first_hidden(self, layers: list[int]) -> Neurons:
         neurons: Neurons = []
 
-        for i in range(self.num_hidden_layers):
+        for i in layers:
             if self.input_weight[i].any() or self.input_bias[i].any():
                 # some neurons in this layer are connected directly to the input layer (so they may be in the first hidden layer)
                 # note that this implies there are some False values in self.prev_mask[i]
@@ -159,6 +197,12 @@ class BuildingNode:
                 else:
                     # otherwise, we need to check which neurons are not connected to the previous layers anymore
                     raise NotImplementedError
+            else:
+                # input weights and biases are blank
+                # which means that all neurons in this layer have been reduced (and disabled)
+                # or no neurons in the previous layer have been reduced
+                # => there are definitely no "first hidden" neurons in this layer
+                pass
 
         return neurons
 
@@ -167,9 +211,10 @@ class BuildingNode:
         candidates = []
 
         for i, neurons_indices in neurons_first_hidden:
-            saturated = self.num_saturated[i].flatten()[neurons_indices]
-            minimum = torch.maximum(saturated, data_len-saturated).min(0)
-            candidates.append((minimum.values, i, minimum.indices))
+            num_saturated = self.num_saturated[i].flatten()[neurons_indices]
+            minimum = torch.maximum(num_saturated, data_len-num_saturated).min(0)
+            global_index = neurons_indices[minimum.indices]  # we used neurons_indices to select a subset of neurons
+            candidates.append((minimum.values, i, global_index))
 
         _, layer, neuron = min(candidates)
         self.decision_weight = self.input_weight[layer][neuron]
