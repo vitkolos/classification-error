@@ -189,27 +189,32 @@ class BuildingNode:
 
     def reduce_layer(self, i: int, idx_linear: torch.Tensor, idx_dead: torch.Tensor):
         if idx_linear.numel() > 0:
-            zero_vectors = torch.zeros(len(idx_linear), *self.prev_mask[i+1].shape[1:])
-            coords_linear = torch.unravel_index(idx_linear, self.prev_mask[i+1].shape)
-            coords_linear = (torch.arange(len(idx_linear)), *coords_linear[1:])
-            unit_vectors = zero_vectors.clone()
-            unit_vectors[coords_linear] = 1
-            assert unit_vectors.flatten(1).sum(dim=1).eq(1).all()
-
-            coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vectors)  # w[j,k]
-            coeffs = coeffs.flatten(1)
-            weight = self.input_weight[i][idx_linear]  # w[j,i]
-            bias = self.input_bias_init[i][idx_linear] + self.input_bias_addit[i][idx_linear]  # b[j]
-            # for every disabled neuron j, for every input neuron i, for every successor k: w_ki += w_kj * w_ji
-            self.input_weight[i+1] += torch.einsum('jk,ji->ki', coeffs, weight)
-            # for every disabled neuron j, for every successory k: b_k += w_kj * b_j
-            self.input_bias_addit[i+1] += torch.einsum('jk,j->k', coeffs, bias)
+            for idx_chunk in idx_linear.split(self.batch_size):
+                self.reduce_linear_neurons(i, idx_chunk)
 
         for idx in [idx_linear, idx_dead]:
             coords = torch.unravel_index(idx, self.prev_mask[i+1].shape)
             self.prev_mask[i+1][coords] = 0
 
         # print(f"from {i} removed", idx_linear, "<- linear | dead ->", idx_dead)
+
+    def reduce_linear_neurons(self, i: int, idx_linear: torch.Tensor):
+        coords_linear = torch.unravel_index(idx_linear, self.prev_mask[i+1].shape)
+        coords_linear = (torch.arange(len(idx_linear)), *coords_linear[1:])
+        unit_vectors = torch.zeros(len(idx_linear), *self.prev_mask[i+1].shape[1:])
+        zero_vector = unit_vectors[0:1].clone()
+        unit_vectors[coords_linear] = 1
+        assert unit_vectors.flatten(1).sum(dim=1).eq(1).all()
+
+        # FIXME: does not work well for convolution
+        coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vector)  # w[j,k]
+        coeffs = coeffs.flatten(1)
+        weight = self.input_weight[i][idx_linear]  # w[j,i]
+        bias = self.input_bias_init[i][idx_linear] + self.input_bias_addit[i][idx_linear]  # b[j]
+        # for every disabled neuron j, for every input neuron i, for every successor k: w_ki += w_kj * w_ji
+        self.input_weight[i+1] += torch.einsum('jk,ji->ki', coeffs, weight)
+        # for every disabled neuron j, for every successory k: b_k += w_kj * b_j
+        self.input_bias_addit[i+1] += torch.einsum('jk,j->k', coeffs, bias)
 
     def find_neurons_first_hidden(self, layers: typing.Iterable[int], neurons: Neurons):
         """
