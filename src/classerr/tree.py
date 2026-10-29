@@ -179,7 +179,10 @@ class BuildingNode:
                 if reducible.any():
                     self.reduce_layer(i, neurons_indices[linear], neurons_indices[dead])
                     to_be_rescanned.add(i)  # remove the reduced neurons from the list
-                    to_be_rescanned.add(i+1)  # now, the neurons in the next layer may be in the FHL
+
+                    if i+1 < self.num_hidden_layers:  # check if there's a next layer
+                        # now, the neurons in the next layer may belong in the FHL
+                        to_be_rescanned.add(i+1)
 
         return neurons_first_hidden
 
@@ -284,12 +287,43 @@ class BuildingNode:
 
         mask = torch.cat(mask_list)
 
-        if mask.all() or not mask.any():
-            breakpoint()
-
         left = self.make_child(self.data_idx[mask], "l")
         right = self.make_child(self.data_idx[~mask], "r")
         return left, right
+
+
+class Node:
+    def __init__(self, building_node: BuildingNode):
+        self.is_leaf = False
+        self.output_shape = building_node.output_shape
+
+        # inner nodes
+        self.decision_weight = building_node.decision_weight
+        self.decision_bias = building_node.decision_bias
+        self.left: Node | None = None
+        self.right: Node | None = None
+
+        # leaves
+        self.input_weight: torch.Tensor | None = None
+        self.input_bias: torch.Tensor | None = None
+
+        if building_node.left is not None and building_node.right is not None:
+            self.left = Node(building_node.left)
+            self.right = Node(building_node.right)
+        else:
+            self.is_leaf = True
+            self.input_weight = building_node.input_weight[-1]
+            self.input_bias = building_node.input_bias_init[-1] + building_node.input_bias_addit[-1]
+
+    def __call__(self, xs: torch.Tensor):
+        assert xs.shape[0] == 1, "batch size has to be one"
+
+        if self.is_leaf:
+            return F.linear(xs.flatten(1), self.input_weight, self.input_bias).reshape(self.output_shape)
+
+        sat_cond = xs.flatten(1) @ self.decision_weight + self.decision_bias < 0
+
+        return self.left(xs) if sat_cond else self.right(xs)
 
 
 def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset):
@@ -306,3 +340,17 @@ def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils
                 stack.append(node.left)
                 stack.append(node.right)
                 pbar.update(1)
+
+    loader = torch.utils.data.DataLoader(root.subset, batch_size=root.batch_size)
+
+    for inputs, _ in classerr.utils.progress(loader):
+        torch.testing.assert_close(root.forward_count(inputs), model(inputs))
+
+    tree = Node(root)
+
+    loader = torch.utils.data.DataLoader(root.subset, batch_size=1)
+
+    for inputs, _ in classerr.utils.progress(loader):
+        torch.testing.assert_close(tree(inputs), model(inputs))
+
+    print("all correct")
