@@ -114,6 +114,7 @@ class BuildingNode:
         xs = self.apply_linearity(i, xs, inputs)
         self.store_output_shape(xs.shape)
 
+        torch.testing.assert_close(xs, self.model(inputs))
         return xs
 
     def disable_connections(self, i: int, xs: torch.Tensor) -> torch.Tensor:
@@ -188,10 +189,13 @@ class BuildingNode:
 
     def reduce_layer(self, i: int, idx_linear: torch.Tensor, idx_dead: torch.Tensor):
         if idx_linear.numel() > 0:
-            coords_linear = torch.unravel_index(idx_linear, self.prev_mask[i+1].shape)
             zero_vectors = torch.zeros(len(idx_linear), *self.prev_mask[i+1].shape[1:])
+            coords_linear = torch.unravel_index(idx_linear, self.prev_mask[i+1].shape)
+            coords_linear = (torch.arange(len(idx_linear)), *coords_linear[1:])
             unit_vectors = zero_vectors.clone()
             unit_vectors[coords_linear] = 1
+            assert unit_vectors.flatten(1).sum(dim=1).eq(1).all()
+
             coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vectors)  # w[j,k]
             coeffs = coeffs.flatten(1)
             weight = self.input_weight[i][idx_linear]  # w[j,i]
@@ -337,14 +341,9 @@ def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils
             node.build()
 
             if node.left is not None and node.right is not None:
-                stack.append(node.left)
                 stack.append(node.right)
+                stack.append(node.left)
                 pbar.update(1)
-
-    loader = torch.utils.data.DataLoader(root.subset, batch_size=root.batch_size)
-
-    for inputs, _ in classerr.utils.progress(loader):
-        torch.testing.assert_close(root.forward_count(inputs), model(inputs))
 
     tree = Node(root)
 
