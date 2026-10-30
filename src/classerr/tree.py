@@ -11,6 +11,13 @@ from classerr.utils import len_ds
 
 Neurons = dict[int, torch.Tensor]
 
+LAYERS_LINEAR = [
+    # actual linear projections
+    nn.Linear, nn.modules.conv._ConvNd, nn.modules.batchnorm._BatchNorm,
+    # other kinds of layers not violating linearity
+    nn.Flatten, nn.Dropout,
+]
+
 
 class BuildingNode:
     def __init__(
@@ -20,6 +27,9 @@ class BuildingNode:
         batch_size: int,
         data_idx: torch.Tensor
     ):
+        if model.training:
+            raise classerr.utils.AppError("model is in the training mode; you should call model.eval()")
+
         self.name = ""
         self.dataset = dataset
         self.model = model
@@ -104,7 +114,11 @@ class BuildingNode:
                     last_nonlinearity = j
                     xs = self.disable_connections(i, xs)
                 case _:
-                    xs = module(xs)
+                    if any(isinstance(module, t) for t in LAYERS_LINEAR):
+                        xs = module(xs)
+                    else:
+                        raise NotImplementedError(
+                            f"BuildTree.forward_count is not implemented for '{type(module).__name__}' module")
 
         if last_nonlinearity == j:
             raise classerr.utils.AppError("model ends with a nonlinear layer")
@@ -196,17 +210,14 @@ class BuildingNode:
             coords = torch.unravel_index(idx, self.prev_mask[i+1].shape)
             self.prev_mask[i+1][coords] = 0
 
-        # print(f"from {i} removed", idx_linear, "<- linear | dead ->", idx_dead)
-
     def reduce_linear_neurons(self, i: int, idx_linear: torch.Tensor):
-        coords_linear = torch.unravel_index(idx_linear, self.prev_mask[i+1].shape)
-        coords_linear = (torch.arange(len(idx_linear)), *coords_linear[1:])
-        unit_vectors = torch.zeros(len(idx_linear), *self.prev_mask[i+1].shape[1:])
+        neurons_arranged_shape = self.prev_mask[i+1].shape[1:]
+        coords_linear = torch.unravel_index(idx_linear, neurons_arranged_shape)
+        unit_vectors = torch.zeros(len(idx_linear), *neurons_arranged_shape)
         zero_vector = unit_vectors[0:1].clone()
-        unit_vectors[coords_linear] = 1
+        unit_vectors[(torch.arange(len(idx_linear)), *coords_linear)] = 1
         assert unit_vectors.flatten(1).sum(dim=1).eq(1).all()
 
-        # FIXME: does not work well for convolution
         coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vector)  # w[j,k]
         coeffs = coeffs.flatten(1)
         weight = self.input_weight[i][idx_linear]  # w[j,i]
