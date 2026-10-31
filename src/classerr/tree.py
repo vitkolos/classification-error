@@ -380,12 +380,15 @@ class BuildingNode:
         return None
 
     def find_criterion(self, neurons_first_hidden: Neurons) -> tuple[torch.Tensor, torch.Tensor]:
+        data_len = torch.tensor(len(self.data_idx))
         candidates = []
 
-        # best candidate minimizes the distance (spread) between min and max num_active
+        # best candidate minimizes the distance (spread) between non-zero min num_active and max num_active
+        # note that each candidate has at least two non-zero values and that the values sum up to data_len
         for i, neurons_indices in neurons_first_hidden.items():
             num_active = self.num_active[i][neurons_indices]
-            spread = num_active.max(dim=1).values - num_active.min(dim=1).values
+            masked = torch.where(num_active == 0, data_len, num_active)
+            spread = num_active.max(dim=1).values - masked.min(dim=1).values
             minimum = spread.min(0)
             global_index = neurons_indices[minimum.indices]  # we used neurons_indices to select a subset of neurons
             candidates.append((minimum.values, i, global_index))
@@ -401,10 +404,11 @@ class BuildingNode:
                 decision_bias = torch.stack((bias, torch.zeros_like(bias)))
                 return decision_weight, decision_bias
             case nn.MaxPool2d():
-                in_indices = nl.idx_map[neuron]
-                decision_weight = self.input_weight[layer][in_indices]
-                decision_bias = self.input_bias_init[layer][in_indices] + self.input_bias_addit[layer][in_indices]
-                return decision_weight, decision_bias
+                in_index = nl.idx_map[neuron]
+                decision_weight = self.input_weight[layer][in_index]
+                decision_bias = self.input_bias_init[layer][in_index] + self.input_bias_addit[layer][in_index]
+                active = self.num_active[layer][neuron] > 0
+                return decision_weight[active], decision_bias[active]
             case _ as m:
                 BuildingNode.raise_not_implemented(m)
 
