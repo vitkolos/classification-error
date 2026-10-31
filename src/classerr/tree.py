@@ -163,7 +163,7 @@ class BuildingNode:
                     idx_map = torch.arange(xs[0].numel()).unsqueeze(1)
                 case nn.MaxPool2d() as maxpool:
                     _, C, H, W = xs.shape
-                    idx_grid = torch.arange(C * H * W).reshape(1, C, H, W)
+                    idx_grid = torch.arange(C * H * W).float().reshape(1, C, H, W)
                     idx_patches = F.unfold(
                         idx_grid,
                         maxpool.kernel_size,
@@ -212,8 +212,12 @@ class BuildingNode:
             return xs + F.linear(inputs.flatten(1), self.input_weight[i], self.input_bias_addit[i]).reshape(xs.shape)
 
     def increment_activity_counters(self, i: int, xs: torch.Tensor):
-        update: torch.Tensor | None = None
         nl = self.nonlinearities[i]
+
+        if i == len(self.num_active):
+            self.num_active.append(torch.zeros((nl.idx_map.shape[0], nl.num_branches), dtype=torch.int))
+
+        update: torch.Tensor | None = None
 
         match nl.module:
             case nn.ReLU():
@@ -228,9 +232,6 @@ class BuildingNode:
                 update = F.one_hot(argmax_idx, num_classes=nl.num_branches).sum(dim=0)
             case _:
                 BuildingNode.raise_not_implemented(nl.module)
-
-        if i == len(self.num_active):
-            self.num_active.append(torch.zeros((xs.shape[1:].numel(), nl.num_branches), dtype=torch.int))
 
         self.num_active[i] += update
 
