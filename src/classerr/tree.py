@@ -11,6 +11,10 @@ from classerr.utils import len_ds
 
 Neurons = dict[int, torch.Tensor]
 
+LAYERS_NONLINEAR = [
+    nn.ReLU,
+]
+
 LAYERS_LINEAR = [
     # actual linear projections
     nn.Linear, nn.modules.conv._ConvNd, nn.modules.batchnorm._BatchNorm,
@@ -46,13 +50,11 @@ class BuildingNode:
         self.input_bias_addit: list[torch.Tensor] = []  # additional bias (collected from the ancestors)
         self.prev_mask: list[torch.Tensor] = []
 
-        self.num_saturated: list[torch.Tensor] = []
+        self.num_active: list[torch.Tensor] = []
 
         self.decision_weight: torch.Tensor | None = None
         self.decision_bias: torch.Tensor | None = None
-
-        self.left: BuildingNode | None = None
-        self.right: BuildingNode | None = None
+        self.children: list[BuildingNode] = []
 
     def make_child(self, data_idx: torch.Tensor, name_suffix: str = "") -> 'BuildingNode':
         child = BuildingNode(self.dataset, self.model, self.batch_size, data_idx)
@@ -69,15 +71,15 @@ class BuildingNode:
     @property
     def num_hidden_layers(self):
         """number of hidden layers before reduction"""
-        return len(self.num_saturated)
+        return len(self.num_active)
 
     def num_neurons_in_layer(self, i: int):
         return self.input_bias_init[i].numel()
 
     @torch.no_grad()
     def build(self):
-        # compute num_saturated
-        self.compute_saturations()
+        # compute num_active
+        self.compute_activity()
         # reduce (as long as there are reducible neurons in the first hidden layer)
         neurons_first_hidden = self.reduce()
 
@@ -86,11 +88,11 @@ class BuildingNode:
             # find the branching neuron, extract its affine projection (shortcut weights)
             self.set_branching_criterion(neurons_first_hidden)
             # create children + split data_idx and assign them to the children according to the decision criterion
-            self.left, self.right = self.create_children()
+            self.children = self.create_children()
 
-    def compute_saturations(self):
-        if self.num_saturated:
-            raise classerr.utils.AppError("saturations have already been computed")
+    def compute_activity(self):
+        if self.num_active:
+            raise classerr.utils.AppError("activity has already been computed")
 
         loader = torch.utils.data.DataLoader(self.subset, batch_size=self.batch_size)
 
@@ -104,21 +106,19 @@ class BuildingNode:
         xs = self.disable_connections(i, xs)
 
         for j, module in enumerate(self.model):
-            match module:
-                case nn.ReLU():
-                    self.store_linear_seq(i, last_nonlinearity, j)
-                    xs = self.apply_linearity(i, xs, inputs)
-                    self.increment_saturation_counters(i, xs)
-                    xs = module(xs)
-                    i += 1
-                    last_nonlinearity = j
-                    xs = self.disable_connections(i, xs)
-                case _:
-                    if any(isinstance(module, t) for t in LAYERS_LINEAR):
-                        xs = module(xs)
-                    else:
-                        raise NotImplementedError(
-                            f"BuildTree.forward_count is not implemented for '{type(module).__name__}' module")
+            if any(isinstance(module, t) for t in LAYERS_NONLINEAR):
+                self.store_linear_seq(i, last_nonlinearity, j)
+                xs = self.apply_linearity(i, xs, inputs)
+                self.increment_activity_counters(i, xs, module)
+                xs = module(xs)
+                i += 1
+                last_nonlinearity = j
+                xs = self.disable_connections(i, xs)
+            elif any(isinstance(module, t) for t in LAYERS_LINEAR):
+                xs = module(xs)
+            else:
+                raise NotImplementedError(
+                    f"BuildTree.forward_count is not implemented for '{type(module).__name__}' module")
 
         if last_nonlinearity == j:
             raise classerr.utils.AppError("model ends with a nonlinear layer")
@@ -169,11 +169,13 @@ class BuildingNode:
         else:
             return xs + F.linear(inputs.flatten(1), self.input_weight[i], self.input_bias_addit[i]).reshape(xs.shape)
 
-    def increment_saturation_counters(self, i: int, xs: torch.Tensor):
-        if i == len(self.num_saturated):
-            self.num_saturated.append(torch.zeros(xs.shape[1:], dtype=torch.int))
+    def increment_activity_counters(self, i: int, xs: torch.Tensor, module: torch.nn.Module):
+        if i == len(self.num_active):
+            self.num_active.append(torch.zeros(xs.shape[1:].numel(), dtype=torch.int))
 
-        self.num_saturated[i] += (xs < 0).sum(dim=0)
+        # MAX: we need to somehow apply the transformation that module does (but in the arg-way)
+        # MAX: we are interested in the number of "activations" (argmax + bincount)
+        self.num_active[i] += (xs < 0).sum(dim=0).flatten()
 
     def reduce(self) -> Neurons:
         """returns lists of neurons in the first hidden layer (FHL) after reduction"""
@@ -186,13 +188,19 @@ class BuildingNode:
             to_be_rescanned.clear()
 
             for i, neurons_indices in neurons_first_hidden.items():
-                num_saturated = self.num_saturated[i].flatten()[neurons_indices]
-                linear = (num_saturated == 0)
-                dead = (num_saturated == data_len)
+                num_active = self.num_active[i][neurons_indices]
+                # MAX: reducible neurons have all zeros except for one
+                linear = (num_active == 0)
+                dead = (num_active == data_len)
                 reducible = linear | dead
 
                 if reducible.any():
-                    self.reduce_layer(i, neurons_indices[linear], neurons_indices[dead])
+                    # MAX: for each FHL neuron, we should be able to get all the w&b in a reasonable shape
+                    reducible_idx = neurons_indices[reducible]
+                    linear_idx = neurons_indices[linear]
+                    linear_weight = self.input_weight[i][linear_idx]
+                    linear_bias = self.input_bias_init[i][linear_idx] + self.input_bias_addit[i][linear_idx]
+                    self.reduce_layer(i, reducible_idx, linear_idx, linear_weight, linear_bias)
                     to_be_rescanned.add(i)  # remove the reduced neurons from the list
 
                     if i+1 < self.num_hidden_layers:  # check if there's a next layer
@@ -201,31 +209,40 @@ class BuildingNode:
 
         return neurons_first_hidden
 
-    def reduce_layer(self, i: int, idx_linear: torch.Tensor, idx_dead: torch.Tensor):
-        if idx_linear.numel() > 0:
-            for idx_chunk in idx_linear.split(self.batch_size):
-                self.reduce_linear_neurons(i, idx_chunk)
+    def reduce_layer(
+        self,
+        i: int,
+        reducible_idx: torch.Tensor,
+        linear_idx: torch.Tensor,
+        linear_weight: torch.Tensor,
+        linear_bias: torch.Tensor
+    ):
+        if linear_idx.numel() > 0:
+            for idx, w, b in zip(
+                linear_idx.split(self.batch_size),
+                linear_weight.split(self.batch_size),
+                linear_bias.split(self.batch_size)
+            ):
+                self.reduce_linear_neurons(i, w, b, idx)
 
-        for idx in [idx_linear, idx_dead]:
+        for idx in reducible_idx:
             coords = torch.unravel_index(idx, self.prev_mask[i+1].shape)
             self.prev_mask[i+1][coords] = 0
 
-    def reduce_linear_neurons(self, i: int, idx_linear: torch.Tensor):
+    def reduce_linear_neurons(self, i: int, in_weight: torch.Tensor, in_bias: torch.Tensor, out_idx: torch.Tensor):
         neurons_arranged_shape = self.prev_mask[i+1].shape[1:]
-        coords_linear = torch.unravel_index(idx_linear, neurons_arranged_shape)
-        unit_vectors = torch.zeros(len(idx_linear), *neurons_arranged_shape)
+        coords_linear = torch.unravel_index(out_idx, neurons_arranged_shape)
+        unit_vectors = torch.zeros(len(out_idx), *neurons_arranged_shape)
         zero_vector = unit_vectors[0:1].clone()
-        unit_vectors[(torch.arange(len(idx_linear)), *coords_linear)] = 1
+        unit_vectors[(torch.arange(len(out_idx)), *coords_linear)] = 1
         assert unit_vectors.flatten(1).sum(dim=1).eq(1).all()
 
         coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vector)  # w[j,k]
         coeffs = coeffs.flatten(1)
-        weight = self.input_weight[i][idx_linear]  # w[j,i]
-        bias = self.input_bias_init[i][idx_linear] + self.input_bias_addit[i][idx_linear]  # b[j]
         # for every disabled neuron j, for every input neuron i, for every successor k: w_ki += w_kj * w_ji
-        self.input_weight[i+1] += torch.einsum('jk,ji->ki', coeffs, weight)
+        self.input_weight[i+1] += torch.einsum('jk,ji->ki', coeffs, in_weight)
         # for every disabled neuron j, for every successory k: b_k += w_kj * b_j
-        self.input_bias_addit[i+1] += torch.einsum('jk,j->k', coeffs, bias)
+        self.input_bias_addit[i+1] += torch.einsum('jk,j->k', coeffs, in_bias)
 
     def find_neurons_first_hidden(self, layers: typing.Iterable[int], neurons: Neurons):
         """
@@ -284,12 +301,14 @@ class BuildingNode:
                     return disconnected_indices
 
     def set_branching_criterion(self, neurons_first_hidden: Neurons):
+        # MAX: branching criterion has to be an argmax (parametrized by several linear transformations)
         data_len = torch.tensor(len(self.data_idx))
         candidates = []
 
+        # MAX: best candidate minimizes the distance between min and max num of activations
         for i, neurons_indices in neurons_first_hidden.items():
-            num_saturated = self.num_saturated[i].flatten()[neurons_indices]
-            minimum = torch.maximum(num_saturated, data_len-num_saturated).min(0)
+            num_active = self.num_active[i][neurons_indices]
+            minimum = torch.maximum(num_active, data_len-num_active).min(0)
             global_index = neurons_indices[minimum.indices]  # we used neurons_indices to select a subset of neurons
             candidates.append((minimum.values, i, global_index))
 
@@ -297,19 +316,23 @@ class BuildingNode:
         self.decision_weight = self.input_weight[layer][neuron]
         self.decision_bias = self.input_bias_init[layer][neuron] + self.input_bias_addit[layer][neuron]
 
-    def create_children(self) -> tuple['BuildingNode', 'BuildingNode']:
+    def create_children(self) -> list['BuildingNode']:
         loader = torch.utils.data.DataLoader(self.subset, batch_size=self.batch_size)
-        mask_list = []
+        branch_list = []
+        num_branches = 2
 
         for inputs, _ in classerr.utils.progress(loader):
-            sat_cond = inputs.flatten(1) @ self.decision_weight + self.decision_bias < 0
-            mask_list.append(sat_cond)
+            # MAX: modify criterion
+            sat_cond = inputs.flatten(1) @ self.decision_weight + self.decision_bias >= 0
+            branch_list.append(sat_cond)
 
-        mask = torch.cat(mask_list)
+        branching = torch.cat(branch_list)
+        children = []
 
-        left = self.make_child(self.data_idx[mask], "l")
-        right = self.make_child(self.data_idx[~mask], "r")
-        return left, right
+        for b in range(num_branches):
+            children.append(self.make_child(self.data_idx[branching == b], str(b)))
+
+        return children
 
 
 class Node:
@@ -320,16 +343,14 @@ class Node:
         # inner nodes
         self.decision_weight = building_node.decision_weight
         self.decision_bias = building_node.decision_bias
-        self.left: Node | None = None
-        self.right: Node | None = None
+        self.children: list[Node] = []
 
         # leaves
         self.input_weight: torch.Tensor | None = None
         self.input_bias: torch.Tensor | None = None
 
-        if building_node.left is not None and building_node.right is not None:
-            self.left = Node(building_node.left)
-            self.right = Node(building_node.right)
+        if building_node.children:
+            self.children = [Node(child) for child in building_node.children]
         else:
             self.is_leaf = True
             self.input_weight = building_node.input_weight[-1]
@@ -341,9 +362,9 @@ class Node:
         if self.is_leaf:
             return F.linear(xs.flatten(1), self.input_weight, self.input_bias).reshape(self.output_shape)
 
-        sat_cond = xs.flatten(1) @ self.decision_weight + self.decision_bias < 0
-
-        return self.left(xs) if sat_cond else self.right(xs)
+        sat_cond = xs.flatten(1) @ self.decision_weight + self.decision_bias >= 0
+        idx = int(sat_cond)
+        return self.children[idx](xs)
 
 
 def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset):
@@ -356,9 +377,8 @@ def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils
             node = stack.pop()
             node.build()
 
-            if node.left is not None and node.right is not None:
-                stack.append(node.right)
-                stack.append(node.left)
+            if node.children:
+                stack.extend(reversed(node.children))
                 pbar.update(1)
 
     tree = Node(root)
