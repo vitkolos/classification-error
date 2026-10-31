@@ -1,4 +1,6 @@
+import dataclasses
 import typing
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -11,10 +13,7 @@ from classerr.utils import len_ds
 
 Neurons = dict[int, torch.Tensor]
 
-LAYERS_NONLINEAR = [
-    nn.ReLU,
-]
-
+LAYERS_NONLINEAR = [nn.ReLU, nn.MaxPool2d]
 LAYERS_LINEAR = [
     # actual linear projections
     nn.Linear, nn.modules.conv._ConvNd, nn.modules.batchnorm._BatchNorm,
@@ -22,6 +21,12 @@ LAYERS_LINEAR = [
     nn.Flatten, nn.Dropout,
 ]
 
+
+@dataclasses.dataclass
+class Nonlinearity:
+    module: torch.nn.Module
+    num_branches: int
+    idx_map: torch.Tensor
 
 class BuildingNode:
     def __init__(
@@ -50,11 +55,17 @@ class BuildingNode:
         self.input_bias_addit: list[torch.Tensor] = []  # additional bias (collected from the ancestors)
         self.prev_mask: list[torch.Tensor] = []
 
+        self.nonlinearities: list[Nonlinearity] = []
         self.num_active: list[torch.Tensor] = []
 
         self.decision_weight: torch.Tensor | None = None
         self.decision_bias: torch.Tensor | None = None
         self.children: list[BuildingNode] = []
+
+    @staticmethod
+    def raise_not_implemented(module: torch.nn.Module) -> typing.Never:
+        raise NotImplementedError(
+            f"this method in BuildingNode is not implemented for '{type(module).__name__}' module")
 
     def make_child(self, data_idx: torch.Tensor, name_suffix: str = "") -> 'BuildingNode':
         child = BuildingNode(self.dataset, self.model, self.batch_size, data_idx)
@@ -71,7 +82,7 @@ class BuildingNode:
     @property
     def num_hidden_layers(self):
         """number of hidden layers before reduction"""
-        return len(self.num_active)
+        return len(self.nonlinearities)
 
     def num_neurons_in_layer(self, i: int):
         return self.input_bias_init[i].numel()
@@ -86,7 +97,7 @@ class BuildingNode:
         # if there's at least one hidden neuron, we branch:
         if len(neurons_first_hidden) > 0:
             # find the branching neuron, extract its affine projection (shortcut weights)
-            self.set_branching_criterion(neurons_first_hidden)
+            self.decision_weight, self.decision_bias = self.find_criterion(neurons_first_hidden)
             # create children + split data_idx and assign them to the children according to the decision criterion
             self.children = self.create_children()
 
@@ -109,7 +120,8 @@ class BuildingNode:
             if any(isinstance(module, t) for t in LAYERS_NONLINEAR):
                 self.store_linear_seq(i, last_nonlinearity, j)
                 xs = self.apply_linearity(i, xs, inputs)
-                self.increment_activity_counters(i, xs, module)
+                self.store_nonlinearity(i, xs, module)
+                self.increment_activity_counters(i, xs)
                 xs = module(xs)
                 i += 1
                 last_nonlinearity = j
@@ -117,8 +129,7 @@ class BuildingNode:
             elif any(isinstance(module, t) for t in LAYERS_LINEAR):
                 xs = module(xs)
             else:
-                raise NotImplementedError(
-                    f"BuildTree.forward_count is not implemented for '{type(module).__name__}' module")
+                BuildingNode.raise_not_implemented(module)
 
         if last_nonlinearity == j:
             raise classerr.utils.AppError("model ends with a nonlinear layer")
@@ -137,9 +148,40 @@ class BuildingNode:
 
         return xs * self.prev_mask[i]
 
-    def store_linear_seq(self, i, last_nonlinearity, j):
+    def store_linear_seq(self, i: int, last_nonlinearity: int, j: int):
         if len(self.linear_seqs) == i:
             self.linear_seqs.append(self.model[last_nonlinearity+1:j])
+
+    def store_nonlinearity(self, i: int, xs: torch.Tensor, module: torch.nn.Module):
+        if len(self.nonlinearities) == i:
+            num_branches: int | None = None
+            idx_map: torch.Tensor | None = None
+
+            match module:
+                case nn.ReLU():
+                    num_branches = 2
+                    idx_map = torch.arange(xs[0].numel()).unsqueeze(1)
+                case nn.MaxPool2d() as maxpool:
+                    _, C, H, W = xs.shape
+                    idx_grid = torch.arange(C * H * W).reshape(1, C, H, W)
+                    idx_patches = F.unfold(
+                        idx_grid,
+                        maxpool.kernel_size,
+                        maxpool.dilation,
+                        maxpool.padding,
+                        maxpool.stride,
+                    ).long()
+                    num_branches = idx_patches.shape[1] // C
+                    idx_map = (
+                        idx_patches.squeeze(0)  # [C * num_branches, L]
+                        .unflatten(0, (C, num_branches))  # [C, num_branches, L]
+                        .movedim(1, -1)  # [C, L, num_branches]
+                        .flatten(0, 1)  # [C * L, num_branches]
+                    )
+                case _:
+                    BuildingNode.raise_not_implemented(module)
+
+            self.nonlinearities.append(Nonlinearity(module, num_branches, idx_map))
 
     def store_output_shape(self, shape: torch.Size):
         if self.output_shape is None:
@@ -169,13 +211,28 @@ class BuildingNode:
         else:
             return xs + F.linear(inputs.flatten(1), self.input_weight[i], self.input_bias_addit[i]).reshape(xs.shape)
 
-    def increment_activity_counters(self, i: int, xs: torch.Tensor, module: torch.nn.Module):
-        if i == len(self.num_active):
-            self.num_active.append(torch.zeros(xs.shape[1:].numel(), dtype=torch.int))
+    def increment_activity_counters(self, i: int, xs: torch.Tensor):
+        update: torch.Tensor | None = None
+        nl = self.nonlinearities[i]
 
-        # MAX: we need to somehow apply the transformation that module does (but in the arg-way)
-        # MAX: we are interested in the number of "activations" (argmax + bincount)
-        self.num_active[i] += (xs < 0).sum(dim=0).flatten()
+        match nl.module:
+            case nn.ReLU():
+                relu_linear = xs.flatten(1) >= 0
+                relu_linear_num = relu_linear.sum(dim=0)
+                relu_zero_num = len(xs)-relu_linear_num
+                update = torch.stack((relu_linear_num, relu_zero_num), dim=1)
+            case nn.MaxPool2d() as maxpool:
+                patches = F.unfold(xs, maxpool.kernel_size, maxpool.dilation, maxpool.padding, maxpool.stride)
+                windows = patches.unflatten(1, (xs.shape[1], nl.num_branches))  # [N, C, B, L]
+                argmax_idx = windows.argmax(dim=2).flatten(1)  # [N, C*L]
+                update = F.one_hot(argmax_idx, num_classes=nl.num_branches).sum(dim=0)
+            case _:
+                BuildingNode.raise_not_implemented(nl.module)
+
+        if i == len(self.num_active):
+            self.num_active.append(torch.zeros((xs.shape[1:].numel(), nl.num_branches), dtype=torch.int))
+
+        self.num_active[i] += update
 
     def reduce(self) -> Neurons:
         """returns lists of neurons in the first hidden layer (FHL) after reduction"""
@@ -189,18 +246,12 @@ class BuildingNode:
 
             for i, neurons_indices in neurons_first_hidden.items():
                 num_active = self.num_active[i][neurons_indices]
-                # MAX: reducible neurons have all zeros except for one
-                linear = (num_active == 0)
-                dead = (num_active == data_len)
-                reducible = linear | dead
+                # reducible neurons have all zeros except for one => their maximum is data_len
+                maxima = num_active.max(dim=1)
+                reducible = (maxima.values == data_len)
 
                 if reducible.any():
-                    # MAX: for each FHL neuron, we should be able to get all the w&b in a reasonable shape
-                    reducible_idx = neurons_indices[reducible]
-                    linear_idx = neurons_indices[linear]
-                    linear_weight = self.input_weight[i][linear_idx]
-                    linear_bias = self.input_bias_init[i][linear_idx] + self.input_bias_addit[i][linear_idx]
-                    self.reduce_layer(i, reducible_idx, linear_idx, linear_weight, linear_bias)
+                    self.reduce_layer(i, neurons_indices, reducible, maxima.indices)
                     to_be_rescanned.add(i)  # remove the reduced neurons from the list
 
                     if i+1 < self.num_hidden_layers:  # check if there's a next layer
@@ -209,17 +260,30 @@ class BuildingNode:
 
         return neurons_first_hidden
 
-    def reduce_layer(
-        self,
-        i: int,
-        reducible_idx: torch.Tensor,
-        linear_idx: torch.Tensor,
-        linear_weight: torch.Tensor,
-        linear_bias: torch.Tensor
-    ):
-        if linear_idx.numel() > 0:
+    def reduce_layer(self, i: int, neurons_indices: torch.Tensor, reducible: torch.Tensor, argmaxima: torch.Tensor):
+        reducible_idx = neurons_indices[reducible]
+        nl = self.nonlinearities[i]
+
+        linear_out_idx: torch.Tensor | None = None
+        linear_weight: torch.Tensor | None = None
+        linear_bias: torch.Tensor | None = None
+
+        match nl.module:
+            case nn.ReLU():
+                linear_out_idx = neurons_indices[reducible & (argmaxima == 0)]
+                linear_in_idx = linear_out_idx
+            case nn.MaxPool2d():
+                linear_out_idx = reducible_idx
+                linear_in_idx = nl.idx_map[reducible_idx, argmaxima[reducible_idx]]
+            case _ as m:
+                BuildingNode.raise_not_implemented(m)
+
+        linear_weight = self.input_weight[i][linear_in_idx]
+        linear_bias = self.input_bias_init[i][linear_in_idx] + self.input_bias_addit[i][linear_in_idx]
+
+        if linear_out_idx.numel() > 0:
             for idx, w, b in zip(
-                linear_idx.split(self.batch_size),
+                linear_out_idx.split(self.batch_size),
                 linear_weight.split(self.batch_size),
                 linear_bias.split(self.batch_size)
             ):
@@ -253,10 +317,11 @@ class BuildingNode:
         """
         for i in layers:
             found = self.find_neurons_first_hidden_in_layer(i)
-            neurons[i] = found
 
-            if found is None:
-                del neurons[i]
+            if found is not None:
+                neurons[i] = found
+            else:
+                neurons.pop(i, None)
 
         return neurons
 
@@ -285,6 +350,17 @@ class BuildingNode:
 
             EPS = 1e-5
             likely_disconnected = diff_total < EPS
+
+            match self.nonlinearities[i].module:
+                case nn.ReLU():
+                    # 1 to 1 pairing
+                    pass
+                case nn.MaxPool2d() as maxpool:
+                    # apply conjunction
+                    likely_disconnected = (-maxpool(-likely_disconnected.float())).bool()
+                case _ as m:
+                    BuildingNode.raise_not_implemented(m)
+
             likely_disconnected &= self.prev_mask[i+1]  # ignore disabled neurons
 
             if likely_disconnected.any():
@@ -300,31 +376,46 @@ class BuildingNode:
                     disconnected_indices = sus_indices_flat[disconnected_mask]
                     return disconnected_indices
 
-    def set_branching_criterion(self, neurons_first_hidden: Neurons):
-        # MAX: branching criterion has to be an argmax (parametrized by several linear transformations)
-        data_len = torch.tensor(len(self.data_idx))
+        return None
+
+    def find_criterion(self, neurons_first_hidden: Neurons) -> tuple[torch.Tensor, torch.Tensor]:
         candidates = []
 
-        # MAX: best candidate minimizes the distance between min and max num of activations
+        # best candidate minimizes the distance (spread) between min and max num_active
         for i, neurons_indices in neurons_first_hidden.items():
             num_active = self.num_active[i][neurons_indices]
-            minimum = torch.maximum(num_active, data_len-num_active).min(0)
+            spread = num_active.max(dim=1).values - num_active.min(dim=1).values
+            minimum = spread.min(0)
             global_index = neurons_indices[minimum.indices]  # we used neurons_indices to select a subset of neurons
             candidates.append((minimum.values, i, global_index))
 
         _, layer, neuron = min(candidates)
-        self.decision_weight = self.input_weight[layer][neuron]
-        self.decision_bias = self.input_bias_init[layer][neuron] + self.input_bias_addit[layer][neuron]
+        nl = self.nonlinearities[i]
+
+        match nl.module:
+            case nn.ReLU():
+                weight = self.input_weight[layer][neuron]
+                bias = self.input_bias_init[layer][neuron] + self.input_bias_addit[layer][neuron]
+                decision_weight = torch.stack((weight, torch.zeros_like(weight)))
+                decision_bias = torch.stack((bias, torch.zeros_like(bias)))
+                return decision_weight, decision_bias
+            case nn.MaxPool2d():
+                in_indices = nl.idx_map[neuron]
+                decision_weight = self.input_weight[layer][in_indices]
+                decision_bias = self.input_bias_init[layer][in_indices] + self.input_bias_addit[layer][in_indices]
+                return decision_weight, decision_bias
+            case _ as m:
+                BuildingNode.raise_not_implemented(m)
 
     def create_children(self) -> list['BuildingNode']:
         loader = torch.utils.data.DataLoader(self.subset, batch_size=self.batch_size)
         branch_list = []
-        num_branches = 2
+        assert self.decision_weight is not None
+        num_branches = self.decision_weight.shape[0]
 
         for inputs, _ in classerr.utils.progress(loader):
-            # MAX: modify criterion
-            sat_cond = inputs.flatten(1) @ self.decision_weight + self.decision_bias >= 0
-            branch_list.append(sat_cond)
+            argmaxima = F.linear(inputs.flatten(1), self.decision_weight, self.decision_bias).argmax(dim=1)
+            branch_list.append(argmaxima)
 
         branching = torch.cat(branch_list)
         children = []
@@ -360,11 +451,13 @@ class Node:
         assert xs.shape[0] == 1, "batch size has to be one"
 
         if self.is_leaf:
+            assert self.input_weight is not None and self.input_bias is not None and self.output_shape is not None
             return F.linear(xs.flatten(1), self.input_weight, self.input_bias).reshape(self.output_shape)
 
-        sat_cond = xs.flatten(1) @ self.decision_weight + self.decision_bias >= 0
-        idx = int(sat_cond)
-        return self.children[idx](xs)
+        assert self.decision_weight is not None and self.decision_bias is not None
+        branch = F.linear(xs.flatten(1), self.decision_weight, self.decision_bias).argmax(dim=1)
+        branch_idx = int(branch)
+        return self.children[branch_idx](xs)
 
 
 def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset):
