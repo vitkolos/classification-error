@@ -275,7 +275,7 @@ class BuildingNode:
                 linear_in_idx = linear_out_idx
             case nn.MaxPool2d():
                 linear_out_idx = reducible_idx
-                linear_in_idx = nl.idx_map[reducible_idx, argmaxima[reducible_idx]]
+                linear_in_idx = nl.idx_map[reducible_idx, argmaxima[reducible]]
             case _ as m:
                 BuildingNode.raise_not_implemented(m)
 
@@ -391,7 +391,7 @@ class BuildingNode:
             candidates.append((minimum.values, i, global_index))
 
         _, layer, neuron = min(candidates)
-        nl = self.nonlinearities[i]
+        nl = self.nonlinearities[layer]
 
         match nl.module:
             case nn.ReLU():
