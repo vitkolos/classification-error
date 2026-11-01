@@ -13,13 +13,13 @@ from classerr.utils import len_ds
 
 Neurons = dict[int, torch.Tensor]
 
-LAYERS_NONLINEAR = [nn.ReLU, nn.MaxPool2d]
-LAYERS_LINEAR = [
+LAYERS_NONLINEAR = (nn.ReLU, nn.MaxPool2d)
+LAYERS_LINEAR = (
     # actual linear projections
     nn.Linear, nn.modules.conv._ConvNd, nn.modules.batchnorm._BatchNorm,
     # other kinds of layers not violating linearity
     nn.Flatten, nn.Dropout,
-]
+)
 
 
 @dataclasses.dataclass
@@ -27,6 +27,7 @@ class Nonlinearity:
     module: torch.nn.Module
     num_branches: int
     idx_map: torch.Tensor
+
 
 class BuildingNode:
     def __init__(
@@ -117,7 +118,7 @@ class BuildingNode:
         xs = self.disable_connections(i, xs)
 
         for j, module in enumerate(self.model):
-            if any(isinstance(module, t) for t in LAYERS_NONLINEAR):
+            if isinstance(module, LAYERS_NONLINEAR):
                 self.store_linear_seq(i, last_nonlinearity, j)
                 xs = self.apply_linearity(i, xs, inputs)
                 self.store_nonlinearity(i, xs, module)
@@ -126,7 +127,7 @@ class BuildingNode:
                 i += 1
                 last_nonlinearity = j
                 xs = self.disable_connections(i, xs)
-            elif any(isinstance(module, t) for t in LAYERS_LINEAR):
+            elif isinstance(module, LAYERS_LINEAR):
                 xs = module(xs)
             else:
                 BuildingNode.raise_not_implemented(module)
@@ -355,26 +356,53 @@ class BuildingNode:
             match self.nonlinearities[i].module:
                 case nn.ReLU():
                     # 1 to 1 pairing
-                    pass
+                    enabled_inputs = self.prev_mask[i+1]
                 case nn.MaxPool2d() as maxpool:
-                    # apply conjunction
-                    likely_disconnected = (-maxpool(-likely_disconnected.float())).bool()
+                    ks = maxpool.kernel_size
+                    k_size = (ks, ks) if isinstance(ks, int) else ks
+                    weight = torch.ones((1, 1, *k_size))
+                    # transpose(0, 1) allows us to allocate weight tensor with just a single channel
+                    enabled_outputs = self.prev_mask[i+1].transpose(0, 1).float()  # [C, 1, H, W]
+                    enabled_inputs = F.conv_transpose2d(
+                        enabled_outputs,
+                        weight,
+                        stride=maxpool.stride,
+                        padding=maxpool.padding,
+                        dilation=maxpool.dilation,
+                    ).transpose(0, 1)
+                    height, width = likely_disconnected.shape[2:]
+                    enabled_inputs = enabled_inputs[:, :, :height, :width] > 0  # crop if necessary and convert to bool
                 case _ as m:
                     BuildingNode.raise_not_implemented(m)
 
-            likely_disconnected &= self.prev_mask[i+1]  # ignore disabled neurons
+            likely_disconnected &= enabled_inputs  # ignore inputs corresponding to disabled neurons
 
             if likely_disconnected.any():
                 sus_indices_flat = likely_disconnected.flatten().nonzero(as_tuple=True)[0]
-                N = len(sus_indices_flat)
-                unit_vectors = torch.zeros(N, bias_init.numel())
-                unit_vectors[torch.arange(N), sus_indices_flat] = 1
-                unit_vectors = unit_vectors.reshape(N, *bias_init.shape)
-                grads = torch.func.vmap(vjp_fn)(unit_vectors)[0]
-                disconnected_mask = (grads == 0).flatten(1).any(dim=1)
+                numel = bias_init.numel()
+                disconnected_masks = []
 
-                if disconnected_mask.any():
-                    disconnected_indices = sus_indices_flat[disconnected_mask]
+                for k in range(0, len(sus_indices_flat), self.batch_size):
+                    batch_indices = sus_indices_flat[k:k+self.batch_size]
+                    N = len(batch_indices)
+                    unit_vectors = torch.zeros((N, numel))
+                    unit_vectors[torch.arange(N), batch_indices] = 1
+                    unit_vectors = unit_vectors.reshape(N, *bias_init.shape)
+                    grads = torch.func.vmap(vjp_fn)(unit_vectors)[0]
+                    batch_disconnected = (grads == 0).flatten(1).any(dim=1)
+                    disconnected_masks.append(batch_disconnected)
+
+                disconnected_mask = torch.cat(disconnected_masks)
+                disconnected_indices = sus_indices_flat[disconnected_mask]
+
+                if isinstance(self.nonlinearities[i].module, nn.MaxPool2d):
+                    maxpool = self.nonlinearities[i].module
+                    reconstructed_mask = torch.zeros(bias_init.shape, dtype=torch.bool)
+                    reconstructed_mask.view(-1)[disconnected_indices] = True
+                    reconstructed_mask = (-maxpool(-reconstructed_mask.float())).bool()  # conjunction
+                    disconnected_indices = reconstructed_mask.flatten().nonzero(as_tuple=True)[0]
+
+                if disconnected_indices.numel() > 0:
                     return disconnected_indices
 
         return None
