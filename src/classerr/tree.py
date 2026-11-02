@@ -51,6 +51,7 @@ class BuildingNode:
         self.data_idx = data_idx
         self.subset = torch.utils.data.Subset(dataset, typing.cast(typing.Sequence[int], data_idx))
 
+        self.input_tensors_linked: list[bool] = []
         self.input_weight: list[torch.Tensor] = []
         self.input_bias_init: list[torch.Tensor] = []  # initial bias (present in the original model)
         self.input_bias_addit: list[torch.Tensor] = []  # additional bias (collected from the ancestors)
@@ -73,12 +74,22 @@ class BuildingNode:
         child.name = self.name + name_suffix
         child.linear_seqs = self.linear_seqs
         child.output_shape = self.output_shape
-        # if we were tight on memory, we could reuse the parent's tensors in one of the children
-        child.input_weight = [t.clone() for t in self.input_weight]
-        child.input_bias_init = [t.clone() for t in self.input_bias_init]
-        child.input_bias_addit = [t.clone() for t in self.input_bias_addit]
+        # we refer to the parent's tensors in the children (and perform copy-on-write)
+        child.input_tensors_linked = [True] * len(self.input_tensors_linked)
+        # so these are just shallow copies
+        child.input_weight = self.input_weight[:]
+        child.input_bias_init = self.input_bias_init[:]
+        child.input_bias_addit = self.input_bias_addit[:]
+        # prev_mask is cloned into every node separately
         child.prev_mask = [t.clone() for t in self.prev_mask]
         return child
+
+    def dump_useless_tensors(self):
+        """can be called for an inner node after building its children"""
+        self.input_weight.clear()
+        self.input_bias_init.clear()
+        self.input_bias_addit.clear()
+        self.prev_mask.clear()
 
     @property
     def num_hidden_layers(self):
@@ -101,6 +112,7 @@ class BuildingNode:
             self.decision_weight, self.decision_bias = self.find_criterion(neurons_first_hidden)
             # create children + split data_idx and assign them to the children according to the decision criterion
             self.children = self.create_children()
+            self.dump_useless_tensors()
 
     def compute_activity(self):
         if self.num_active:
@@ -194,6 +206,7 @@ class BuildingNode:
             single_output_shape = torch.Size((1, *xs.shape[1:]))
             w_shape = (single_output_shape.numel(), single_input_shape.numel())
             b_shape = (single_output_shape.numel(),)
+            self.input_tensors_linked.append(False)
             self.input_weight.append(torch.zeros(w_shape))
             self.input_bias_addit.append(torch.zeros(b_shape))
 
@@ -305,6 +318,12 @@ class BuildingNode:
 
         coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vector)  # w[j,k]
         coeffs = coeffs.flatten(1)
+
+        if self.input_tensors_linked[i+1]:
+            self.input_weight[i+1] = self.input_weight[i+1].clone()
+            self.input_bias_addit[i+1] = self.input_bias_addit[i+1].clone()
+            self.input_tensors_linked[i+1] = False
+
         # for every disabled neuron j, for every input neuron i, for every successor k: w_ki += w_kj * w_ji
         self.input_weight[i+1] += torch.einsum('jk,ji->ki', coeffs, in_weight)
         # for every disabled neuron j, for every successory k: b_k += w_kj * b_j
@@ -382,11 +401,10 @@ class BuildingNode:
                 numel = bias_init.numel()
                 disconnected_masks = []
 
-                for k in range(0, len(sus_indices_flat), self.batch_size):
-                    batch_indices = sus_indices_flat[k:k+self.batch_size]
-                    N = len(batch_indices)
+                for sus_indices_chunk in sus_indices_flat.split(self.batch_size):
+                    N = len(sus_indices_chunk)
                     unit_vectors = torch.zeros((N, numel))
-                    unit_vectors[torch.arange(N), batch_indices] = 1
+                    unit_vectors[torch.arange(N), sus_indices_chunk] = 1
                     unit_vectors = unit_vectors.reshape(N, *bias_init.shape)
                     grads = torch.func.vmap(vjp_fn)(unit_vectors)[0]
                     batch_disconnected = (grads == 0).flatten(1).any(dim=1)
@@ -424,6 +442,7 @@ class BuildingNode:
         _, layer, neuron = min(candidates)
         nl = self.nonlinearities[layer]
 
+        # returned decision_weight and decision_bias should be copies, not views
         match nl.module:
             case nn.ReLU():
                 weight = self.input_weight[layer][neuron]
@@ -465,8 +484,8 @@ class Node:
         self.output_shape = building_node.output_shape
 
         # inner nodes
-        self.decision_weight = building_node.decision_weight
-        self.decision_bias = building_node.decision_bias
+        self.decision_weight: torch.Tensor | None = None
+        self.decision_bias: torch.Tensor | None = None
         self.children: list[Node] = []
 
         # leaves
@@ -474,10 +493,12 @@ class Node:
         self.input_bias: torch.Tensor | None = None
 
         if building_node.children:
+            self.decision_weight = building_node.decision_weight.clone()
+            self.decision_bias = building_node.decision_bias.clone()
             self.children = [Node(child) for child in building_node.children]
         else:
             self.is_leaf = True
-            self.input_weight = building_node.input_weight[-1]
+            self.input_weight = building_node.input_weight[-1].clone()
             self.input_bias = building_node.input_bias_init[-1] + building_node.input_bias_addit[-1]
 
     def __call__(self, xs: torch.Tensor):
