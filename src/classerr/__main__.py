@@ -45,7 +45,8 @@ def main(experiment, dataset, run_name, reduction, bits, solver, items, jobs):
                     print(results)
 
             case 'tree':
-                classerr.tree.build_tree(model_orig, data_split.dev)
+                tree = classerr.tree.build_tree(model_orig, data_split.dev)
+                print("tree built")
 
 
 if __name__ == '__main__':

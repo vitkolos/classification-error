@@ -80,23 +80,8 @@ class BuildingNode:
         child.input_weight = self.input_weight[:]
         child.input_bias_init = self.input_bias_init[:]
         child.input_bias_addit = self.input_bias_addit[:]
-        # prev_mask is cloned into every node separately
-        child.prev_mask = [t.clone() for t in self.prev_mask]
+        child.prev_mask = self.prev_mask[:]
         return child
-
-    def dump_useless_tensors(self):
-        """is called at the end of the build process"""
-
-        if self.children:
-            self.input_weight.clear()
-            self.input_bias_init.clear()
-            self.input_bias_addit.clear()
-        else:
-            del self.input_weight[:-1]
-            del self.input_bias_init[:-1]
-            del self.input_bias_addit[:-1]
-
-        self.prev_mask.clear()
 
     @property
     def num_hidden_layers(self):
@@ -119,13 +104,26 @@ class BuildingNode:
             self.decision_weight, self.decision_bias = self.find_criterion(neurons_first_hidden)
             # create children + split data_idx and assign them to the children according to the decision criterion
             self.children = self.create_children()
-        
+
         self.dump_useless_tensors()
 
-    def compute_activity(self):
-        if self.num_active:
-            raise classerr.utils.AppError("activity has already been computed")
+    def dump_useless_tensors(self):
+        """is called at the end of the build process"""
 
+        if self.children:
+            self.input_weight.clear()
+            self.input_bias_init.clear()
+            self.input_bias_addit.clear()
+        else:
+            # leaves need the last tensors for prediction (so we keep them)
+            del self.input_weight[:-1]
+            del self.input_bias_init[:-1]
+            del self.input_bias_addit[:-1]
+
+        self.prev_mask.clear()
+        self.num_active.clear()
+
+    def compute_activity(self):
         loader = torch.utils.data.DataLoader(self.subset, batch_size=self.batch_size)
 
         for inputs, _ in classerr.utils.progress(loader):
@@ -304,6 +302,8 @@ class BuildingNode:
         linear_weight = self.input_weight[i][linear_in_idx]
         linear_bias = self.input_bias_init[i][linear_in_idx] + self.input_bias_addit[i][linear_in_idx]
 
+        self.copy_tensors_before_write(i+1)  # copy-on-write
+
         if linear_out_idx.numel() > 0:
             for idx, w, b in zip(
                 linear_out_idx.split(self.batch_size),
@@ -327,15 +327,17 @@ class BuildingNode:
         coeffs = self.linear_seqs[i+1](unit_vectors) - self.linear_seqs[i+1](zero_vector)  # w[j,k]
         coeffs = coeffs.flatten(1)
 
-        if self.input_tensors_linked[i+1]:
-            self.input_weight[i+1] = self.input_weight[i+1].clone()
-            self.input_bias_addit[i+1] = self.input_bias_addit[i+1].clone()
-            self.input_tensors_linked[i+1] = False
-
         # for every disabled neuron j, for every input neuron i, for every successor k: w_ki += w_kj * w_ji
         self.input_weight[i+1] += torch.einsum('jk,ji->ki', coeffs, in_weight)
         # for every disabled neuron j, for every successory k: b_k += w_kj * b_j
         self.input_bias_addit[i+1] += torch.einsum('jk,j->k', coeffs, in_bias)
+
+    def copy_tensors_before_write(self, i: int):
+        if self.input_tensors_linked[i]:
+            self.input_weight[i] = self.input_weight[i].clone()
+            self.input_bias_addit[i] = self.input_bias_addit[i].clone()
+            self.prev_mask[i] = self.prev_mask[i].clone()
+            self.input_tensors_linked[i] = False
 
     def find_neurons_first_hidden(self, layers: typing.Iterable[int], neurons: Neurons):
         """
@@ -492,8 +494,8 @@ class Node:
         self.output_shape = building_node.output_shape
 
         # inner nodes
-        self.decision_weight: torch.Tensor | None = None
-        self.decision_bias: torch.Tensor | None = None
+        self.decision_weight = building_node.decision_weight
+        self.decision_bias = building_node.decision_bias
         self.children: list[Node] = []
 
         # leaves
@@ -501,8 +503,6 @@ class Node:
         self.input_bias: torch.Tensor | None = None
 
         if building_node.children:
-            self.decision_weight = building_node.decision_weight.clone()
-            self.decision_bias = building_node.decision_bias.clone()
             self.children = [Node(child) for child in building_node.children]
         else:
             self.is_leaf = True
@@ -510,7 +510,8 @@ class Node:
             self.input_bias = building_node.input_bias_init[-1] + building_node.input_bias_addit[-1]
 
     def __call__(self, xs: torch.Tensor):
-        assert xs.shape[0] == 1, "batch size has to be one"
+        if xs.shape[0] != 1:
+            raise classerr.utils.AppError("batch size has to be one")
 
         if self.is_leaf:
             assert self.input_weight is not None and self.input_bias is not None and self.output_shape is not None
@@ -522,10 +523,10 @@ class Node:
         return self.children[branch_idx](xs)
 
 
-def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset):
-    used_length = min(len_ds(dataset), 50)
-    root = BuildingNode(dataset, model.layers, model.batch_size, torch.arange(used_length))
-    stack = [root]
+def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset, max_len: int = 50) -> Node:
+    used_length = min(len_ds(dataset), max_len)
+    building_root = BuildingNode(dataset, model.layers, model.batch_size, torch.arange(used_length))
+    stack = [building_root]
 
     with tqdm.tqdm(total=used_length-1) as pbar:  # to split N items, we will make at most N-1 splits
         while stack:
@@ -536,11 +537,10 @@ def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils
                 stack.extend(reversed(node.children))
                 pbar.update(1)
 
-    tree = Node(root)
-
-    loader = torch.utils.data.DataLoader(root.subset, batch_size=1)
+    tree = Node(building_root)
+    loader = torch.utils.data.DataLoader(building_root.subset, batch_size=1)
 
     for inputs, _ in classerr.utils.progress(loader):
         torch.testing.assert_close(tree(inputs), model(inputs))
 
-    print("all correct")
+    return tree
