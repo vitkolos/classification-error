@@ -85,10 +85,17 @@ class BuildingNode:
         return child
 
     def dump_useless_tensors(self):
-        """can be called for an inner node after building its children"""
-        self.input_weight.clear()
-        self.input_bias_init.clear()
-        self.input_bias_addit.clear()
+        """is called at the end of the build process"""
+
+        if self.children:
+            self.input_weight.clear()
+            self.input_bias_init.clear()
+            self.input_bias_addit.clear()
+        else:
+            del self.input_weight[:-1]
+            del self.input_bias_init[:-1]
+            del self.input_bias_addit[:-1]
+
         self.prev_mask.clear()
 
     @property
@@ -112,7 +119,8 @@ class BuildingNode:
             self.decision_weight, self.decision_bias = self.find_criterion(neurons_first_hidden)
             # create children + split data_idx and assign them to the children according to the decision criterion
             self.children = self.create_children()
-            self.dump_useless_tensors()
+        
+        self.dump_useless_tensors()
 
     def compute_activity(self):
         if self.num_active:
