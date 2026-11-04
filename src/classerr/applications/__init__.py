@@ -1,7 +1,6 @@
 import json
-import torch
 
-from classerr.applications import mnist, california_housing
+from classerr.applications import california, mnist, drive
 import classerr.trainable
 import classerr.utils
 
@@ -23,8 +22,12 @@ class DataBundle:
                 self.data_split = mnist.MnistSplit()
             case 'california':
                 self.model_file = classerr.utils.DIR_MODELS / "california_mlp.pt"
-                self.model_class = california_housing.HousingMLP
-                self.data_split = california_housing.CaliforniaHousingSplit()
+                self.model_class = california.HousingMLP
+                self.data_split = california.CaliforniaHousingSplit()
+            case 'drive':
+                self.model_file = classerr.utils.DIR_MODELS / "drive_mlp.pt"
+                # self.model_class = drive.DriveMLP
+                self.data_split = drive.DriveSplit()
             case _:
                 raise NotImplementedError(f"'{dataset}' dataset is not available")
 
