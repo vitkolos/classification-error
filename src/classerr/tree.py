@@ -509,7 +509,7 @@ class Node:
             self.input_weight = building_node.input_weight[-1].clone()
             self.input_bias = building_node.input_bias_init[-1] + building_node.input_bias_addit[-1]
 
-    def __call__(self, xs: torch.Tensor):
+    def __call__(self, xs: torch.Tensor) -> torch.Tensor:
         if xs.shape[0] != 1:
             raise classerr.utils.AppError("batch size has to be one")
 
@@ -523,7 +523,25 @@ class Node:
         return self.children[branch_idx](xs)
 
 
-def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset, max_len: int = 50) -> Node:
+class Tree:
+    def __init__(self, building_root: BuildingNode):
+        self.root = Node(building_root)
+
+    def __call__(self, xs: torch.Tensor) -> torch.Tensor:
+        return self.root(xs)
+
+    def quality(self, dataset: classerr.utils.Dataset, metric_fn) -> float:
+        loader = torch.utils.data.DataLoader(dataset, batch_size=1)
+        metric_fn.reset()
+
+        for X, y in classerr.utils.progress(loader):
+            pred = self(X)
+            metric_fn.update(pred, y)
+
+        return metric_fn.compute().item()
+
+
+def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset, max_len: int = 100) -> Node:
     used_length = min(len_ds(dataset), max_len)
     building_root = BuildingNode(dataset, model.layers, model.batch_size, torch.arange(used_length))
     stack = [building_root]
@@ -537,10 +555,12 @@ def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils
                 stack.extend(reversed(node.children))
                 pbar.update(1)
 
-    tree = Node(building_root)
+    tree = Tree(building_root)
     loader = torch.utils.data.DataLoader(building_root.subset, batch_size=1)
 
     for inputs, _ in classerr.utils.progress(loader):
         torch.testing.assert_close(tree(inputs), model(inputs))
+
+    print(tree.quality(dataset, model.metric_fn))
 
     return tree

@@ -19,11 +19,12 @@ class DriveDataset(classerr.utils.Dataset):
         if metadata.scaler is None:
             metadata.scaler = sklearn.preprocessing.StandardScaler()
             metadata.scaler.fit(data[:, metadata.sl_data])
-            metadata.error_scaling = metadata.scaler.scale_[0].item()
 
         # standardize
         data[:, metadata.sl_data] = metadata.scaler.transform(data[:, metadata.sl_data])
-        data[:, metadata.sl_target] -= 1  # move from range(1, 12) to range(0, 11)
+
+        # move from range(1, 12) to range(0, 11)
+        data[:, metadata.sl_target] -= 1
 
         if metadata.bounds is None:
             metadata.fit_bounds(data)

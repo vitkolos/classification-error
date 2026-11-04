@@ -70,6 +70,7 @@ class TrainableModel(BaseModel):
         loss_fn,
         optimizer,
         metric_fn: torchmetrics.Metric,
+        metric_name: str = "accuracy",
         scheduler=None,
         epochs=20,
         batch_size=64,
@@ -77,6 +78,7 @@ class TrainableModel(BaseModel):
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.metric_fn = metric_fn
+        self.metric_name = metric_name
         self.scheduler = scheduler
         self.epochs = epochs
         self.batch_size = batch_size
@@ -109,34 +111,19 @@ class TrainableModel(BaseModel):
             self.eval()
             return self._execute_epoch(loader, train=False)
 
-    def quality(self, metric_name: str, data_test: classerr.utils.Dataset, metadata: classerr.utils.Metadata) -> float:
+    def quality(self, data_test: classerr.utils.Dataset, metadata: classerr.utils.Metadata) -> float:
         with torch.no_grad():
             self.eval()
             loader = torch.utils.data.DataLoader(data_test, batch_size=self.batch_size)
-            metric_fn: torchmetrics.Metric | None = None
-
-            match metric_name.lower():
-                case 'rmse':
-                    metric_fn = torchmetrics.MeanSquaredError(False)
-                case 'mae':
-                    metric_fn = torchmetrics.MeanAbsoluteError()
-                case 'accuracy':
-                    metric_fn = torchmetrics.Accuracy(task='multiclass', num_classes=metadata.num_classes)
-                case _:
-                    raise NotImplementedError(f"'{metric_name}' metric is not available")
-
-            loss, metric = self._execute_epoch(loader, train=False, metric_fn=metric_fn)
+            loss, metric = self._execute_epoch(loader, train=False)
             return metric * metadata.error_scaling
 
-    def _execute_epoch(self, loader: torch.utils.data.DataLoader, train: bool, metric_fn: torchmetrics.Metric | None = None) -> tuple[float, float]:
+    def _execute_epoch(self, loader: torch.utils.data.DataLoader, train: bool) -> tuple[float, float]:
         device = self.device
         loss_sum = 0.0
         total_samples = 0
 
-        if metric_fn is None:
-            metric_fn = self.metric_fn
-
-        metric_fn = metric_fn.to(device)
+        metric_fn = self.metric_fn.to(device)
         metric_fn.reset()
 
         for X, y in classerr.utils.progress(loader):
