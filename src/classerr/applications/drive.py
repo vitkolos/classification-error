@@ -18,11 +18,12 @@ class DriveDataset(classerr.utils.Dataset):
     def __init__(self, data: np.ndarray, metadata: classerr.utils.Metadata):
         if metadata.scaler is None:
             metadata.scaler = sklearn.preprocessing.StandardScaler()
-            metadata.scaler.fit(data)
+            metadata.scaler.fit(data[:, metadata.sl_data])
             metadata.error_scaling = metadata.scaler.scale_[0].item()
 
         # standardize
         data[:, metadata.sl_data] = metadata.scaler.transform(data[:, metadata.sl_data])
+        data[:, metadata.sl_target] -= 1  # move from range(1, 12) to range(0, 11)
 
         if metadata.bounds is None:
             metadata.fit_bounds(data)
@@ -30,7 +31,7 @@ class DriveDataset(classerr.utils.Dataset):
             data = metadata.remove_outliers(data)
 
         self.data = torch.from_numpy(data[:, metadata.sl_data]).to(dtype=torch.get_default_dtype())
-        self.target = torch.from_numpy(data[:, metadata.sl_target]).to(dtype=torch.get_default_dtype())
+        self.target = torch.from_numpy(data[:, metadata.sl_target]).to(dtype=torch.long).squeeze()
 
     def __len__(self):
         return self.data.shape[0]
@@ -41,7 +42,6 @@ class DriveDataset(classerr.utils.Dataset):
 
 class DriveSplit(classerr.utils.DataSplit):
     def __init__(self):
-        # data, target = sklearn.datasets.fetch_openml(data_id=4536, data_home=classerr.utils.DIR_DATA_RAW, return_X_y=True)
         filepath = classerr.utils.DIR_DATA_RAW / "Sensorless_drive_diagnosis.txt"
         url = "https://archive.ics.uci.edu/static/public/325/dataset+for+sensorless+drive+diagnosis.zip"
 
@@ -82,7 +82,7 @@ class DriveMLP(classerr.trainable.TrainableModel):
                 nn.Linear(128, 64),
                 nn.ReLU(),
 
-                nn.Linear(64, 1)
+                nn.Linear(64, 11)
             )
         )
         self.configure(
@@ -98,3 +98,6 @@ class DriveMLP(classerr.trainable.TrainableModel):
                 module.bias.data.fill_(0.01)
 
         self.apply(init_weights)
+
+    def callback_stopping(self, epoch, metric_dev):
+        return metric_dev > 0.99
