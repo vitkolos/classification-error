@@ -1,7 +1,10 @@
+import io
+import urllib.request
+import zipfile
+
 import torch
 from torch import nn
 import torchmetrics
-import sklearn.datasets
 import sklearn.preprocessing
 import numpy as np
 
@@ -19,7 +22,7 @@ class DriveDataset(classerr.utils.Dataset):
             metadata.error_scaling = metadata.scaler.scale_[0].item()
 
         # standardize
-        data = metadata.scaler.transform(data)
+        data[:, metadata.sl_data] = metadata.scaler.transform(data[:, metadata.sl_data])
 
         if metadata.bounds is None:
             metadata.fit_bounds(data)
@@ -39,30 +42,36 @@ class DriveDataset(classerr.utils.Dataset):
 class DriveSplit(classerr.utils.DataSplit):
     def __init__(self):
         # data, target = sklearn.datasets.fetch_openml(data_id=4536, data_home=classerr.utils.DIR_DATA_RAW, return_X_y=True)
-        breakpoint()
+        filepath = classerr.utils.DIR_DATA_RAW / "Sensorless_drive_diagnosis.txt"
+        url = "https://archive.ics.uci.edu/static/public/325/dataset+for+sensorless+drive+diagnosis.zip"
 
-        data = np.column_stack((target, data))
+        if not filepath.exists():
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            req = urllib.request.Request(url, headers={"User-Agent": "ClassificationError/1.0"})
+            with urllib.request.urlopen(req) as resp, zipfile.ZipFile(io.BytesIO(resp.read())) as z:
+                z.extract(filepath.name, filepath.parent)
 
+        data = np.loadtxt(filepath)
         splits = {}
-        splits['train_dev'], splits['test'] = classerr.utils.idx_split(data, test_size=1/8, random_state=128)
+        splits['train_dev'], splits['test'] = classerr.utils.idx_split(data, test_size=1/8, random_state=130)
         data_train_dev = data[splits['train_dev']]
         data_test = data[splits['test']]
-        splits['train'], splits['dev'] = classerr.utils.idx_split(data_train_dev, test_size=1/7, random_state=129)
+        splits['train'], splits['dev'] = classerr.utils.idx_split(data_train_dev, test_size=1/7, random_state=131)
         split_parquet_path = classerr.utils.DIR_DATA_PROCESSED / "drive_splits.parquet"
         classerr.utils.load_or_create_split_parquet(split_parquet_path, splits)
 
-        self.metadata = classerr.utils.Metadata()
+        self.metadata = classerr.utils.Metadata(num_classes=11, sl_data=slice(None, -1), sl_target=slice(-1, None))
         train_dev = DriveDataset(data_train_dev, self.metadata)
         self.test = DriveDataset(data_test, self.metadata)
         self.train = torch.utils.data.Subset(train_dev, splits['train'])
         self.dev = torch.utils.data.Subset(train_dev, splits['dev'])
 
 
-class HousingMLP(classerr.trainable.TrainableModel):
+class DriveMLP(classerr.trainable.TrainableModel):
     def __init__(self):
         super().__init__(
             nn.Sequential(
-                nn.Linear(8, 256),
+                nn.Linear(48, 256),
                 nn.ReLU(),
                 nn.Dropout(0.1),
 
@@ -77,9 +86,9 @@ class HousingMLP(classerr.trainable.TrainableModel):
             )
         )
         self.configure(
-            loss_fn=nn.HuberLoss(),
+            loss_fn=nn.CrossEntropyLoss(),
             optimizer=torch.optim.AdamW(self.parameters(), lr=1e-3, weight_decay=1e-5),
-            metric_fn=torchmetrics.MeanSquaredError(),
+            metric_fn=torchmetrics.Accuracy('multiclass', num_classes=11),
             epochs=50,
         )
 

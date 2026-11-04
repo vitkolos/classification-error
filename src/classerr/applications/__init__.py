@@ -26,7 +26,7 @@ class DataBundle:
                 self.data_split = california.CaliforniaHousingSplit()
             case 'drive':
                 self.model_file = classerr.utils.DIR_MODELS / "drive_mlp.pt"
-                # self.model_class = drive.DriveMLP
+                self.model_class = drive.DriveMLP
                 self.data_split = drive.DriveSplit()
             case _:
                 raise NotImplementedError(f"'{dataset}' dataset is not available")
