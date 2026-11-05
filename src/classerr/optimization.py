@@ -15,6 +15,7 @@ class PolytopeResult:
     pred_orig: torch.Tensor
     pred_aprx: torch.Tensor
     width_cor: float
+    width_ext: float
     widths_cls: list[float]
     radii_cls: list[float]
 
@@ -28,8 +29,10 @@ def analyze_linear_region(
 ):
     lp_orig = lp_from_net(model_orig, metadata.bounds, point)
     lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
-    A_cor, b_cor = correct_polytope_constraints(lp_orig, lp_aprx, target)
+    A_cor, b_cor = correct_polytope_constraints(target, lp_orig, lp_aprx)
+    A_ext, b_ext = correct_polytope_constraints(target, lp_orig, lp_aprx=None)
 
+    # approach 1: linear multiclass margin loss
     point_max_err = find_error_maximum(metadata, A_cor, b_cor, lp_aprx, target)
     point_max_err = point_max_err.reshape_as(point)
 
@@ -38,10 +41,15 @@ def analyze_linear_region(
         pred_aprx = model_aprx(point_max_err)
 
     width_cor = polytope_widths(Polytope(metadata.bounds, A_cor, b_cor)).mean().item()
+    width_ext = polytope_widths(Polytope(metadata.bounds, A_ext, b_ext)).mean().item()
 
+    # approach 2: cross-entropy loss
+    ...
+
+    # approach 3: generalized accuracy
     widths_cls, radii_cls = compute_classes_mean_widths(metadata, A_cor, b_cor, lp_aprx)
 
-    return PolytopeResult(point_max_err, pred_orig, pred_aprx, width_cor, widths_cls, radii_cls)
+    return PolytopeResult(point_max_err, pred_orig, pred_aprx, width_cor, width_ext, widths_cls, radii_cls)
 
 
 def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
@@ -118,12 +126,17 @@ def compute_classes_mean_widths(
 
 
 def correct_polytope_constraints(
-    lp_orig: LinearProgram, lp_aprx: LinearProgram, target: int
+    target: int, lp_orig: LinearProgram, lp_aprx: LinearProgram | None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     A_cl, b_cl = constrain_class(target, lp_orig.objective, lp_orig.bias)
-    A_ub = torch.cat([lp_orig.A_ub, lp_aprx.A_ub, A_cl])
-    b_ub = torch.cat([lp_orig.b_ub, lp_aprx.b_ub, b_cl])
-    return A_ub, b_ub
+    A_ub = [A_cl, lp_orig.A_ub]
+    b_ub = [b_cl, lp_orig.b_ub]
+
+    if lp_aprx is not None:
+        A_ub.append(lp_aprx.A_ub)
+        b_ub.append(lp_aprx.b_ub)
+
+    return torch.cat(A_ub), torch.cat(b_ub)
 
 
 def constrain_class(class_dominant: int, weight: torch.Tensor, bias: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
