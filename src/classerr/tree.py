@@ -541,7 +541,7 @@ class Tree:
         return metric_fn.compute().item()
 
 
-def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset, max_len: int = 100) -> Node:
+def build_tree(model: classerr.trainable.TrainableModel, dataset: classerr.utils.Dataset, max_len: int = 100) -> Tree:
     used_length = min(len_ds(dataset), max_len)
     building_root = BuildingNode(dataset, model.layers, model.batch_size, torch.arange(used_length))
     stack = [building_root]

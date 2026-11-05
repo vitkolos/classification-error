@@ -1,6 +1,5 @@
-from __future__ import annotations
-import time
 import torch
+import dataclasses
 
 import classerr.neurons
 import classerr.solving
@@ -8,6 +7,15 @@ from classerr.solving import Polytope, LinearProgram
 from classerr.utils import Bounds, Metadata
 
 NUM_DIRECTIONS = 100
+
+
+@dataclasses.dataclass
+class PolytopeResult:
+    point_max_err: torch.Tensor
+    pred_orig: torch.Tensor
+    pred_aprx: torch.Tensor
+    mean_widths: list[float]
+    radii: list[float]
 
 
 def analyze_linear_region(
@@ -19,10 +27,14 @@ def analyze_linear_region(
 ):
     lp_orig = lp_from_net(model_orig, metadata.bounds, point)
     lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
-    breakpoint()
-    # point_max_err = find_error_maximum(metadata, lp_orig, lp_aprx, point, target)
-    mean_widths = compute_classes_mean_widths(metadata, lp_orig, lp_aprx, target)
-    breakpoint()
+    point_max_err = find_error_maximum(metadata, lp_orig, lp_aprx, point, target)
+
+    with torch.no_grad():
+        pred_orig = model_orig(point_max_err)
+        pred_aprx = model_aprx(point_max_err)
+
+    mean_widths, radii = compute_classes_mean_widths(metadata, lp_orig, lp_aprx, target)
+    return PolytopeResult(point_max_err, pred_orig, pred_aprx, mean_widths, radii)
 
 
 def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
@@ -80,21 +92,25 @@ def find_error_maximum(
 
 def compute_classes_mean_widths(
     metadata: Metadata, lp_orig: LinearProgram, lp_aprx: LinearProgram, target: int
-) -> list[float]:
+) -> tuple[list[float], list[float]]:
     A_ub, b_ub = correct_polytope_constraints(lp_orig, lp_aprx, target)
-    widths = []
+    mean_widths = []
+    radii = []
 
     for k in range(metadata.num_classes):
         A_cl, b_cl = constrain_class(k, lp_aprx.objective, lp_aprx.bias)
         polytope = Polytope(metadata.bounds, torch.cat([A_ub, A_cl]), torch.cat([b_ub, b_cl]))
         mean_width = 0.0
+        radius = chebyshev_radius(polytope)
 
-        if chebyshev_radius(polytope) > 0:  # TODO: consider adding some tolerance here
+        # this is just a coarse filter to get rid of *some* flat polytopes
+        if radius > 0:
             mean_width = polytope_widths(polytope).mean().item()
 
-        widths.append(mean_width)
+        mean_widths.append(mean_width)
+        radii.append(radius)
 
-    return widths
+    return mean_widths, radii
 
 
 def correct_polytope_constraints(
@@ -152,7 +168,6 @@ def chebyshev_radius(polytope: Polytope) -> float:
     if polytope_exists(polytope):
         A_full, b_full = polytope.get_full_constraints()
         _, radius = chebyshev_center(A_full, b_full)
-        print("found radius", radius)
         return radius
     else:
         return 0.0

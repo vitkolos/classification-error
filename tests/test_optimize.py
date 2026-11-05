@@ -12,10 +12,6 @@ import tests.test_neurons
 
 def optimize_testing_procedure(net: nn.Module, sample: torch.Tensor, bounds: Bounds, mixing: float = 0.5):
     net_collectable = net.layers if isinstance(net, classerr.trainable.TrainableModel) else net
-    # constraints = classerr.neurons.Constraints()
-    # message = classerr.neurons.Message(sample)
-    # message = classerr.neurons.collect(net_collectable, message, constraints)
-    # lp = classerr.optimization.lp_from_collected(message, constraints, bounds)
     lp = classerr.optimization.lp_from_net(net_collectable, bounds, sample)
     sample_found, err_found = classerr.solving.solve(lp)
     sample_found = sample_found.reshape_as(sample)
@@ -31,10 +27,6 @@ def optimize_testing_procedure(net: nn.Module, sample: torch.Tensor, bounds: Bou
     assert math.isclose(err_found, err_computed, abs_tol=1e-6), 'Optimization returns different value than the network'
 
     # check if we get the same linear program for a point on the polytope
-    # constraints_point = classerr.neurons.Constraints()
-    # message_point = classerr.neurons.Message(sample_comb)
-    # message_point = classerr.neurons.collect(net_collectable, message_point, constraints_point)
-    # lp_point = classerr.optimization.lp_from_collected(message_point, constraints_point, bounds)
     lp_point = classerr.optimization.lp_from_net(net_collectable, bounds, sample_comb)
 
     for t1, t2 in zip(lp.neuron_states, lp_point.neuron_states):

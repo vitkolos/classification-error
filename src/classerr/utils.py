@@ -102,8 +102,7 @@ def get_samples(dataset: Dataset, items: str = '') -> list[tuple[int, torch.Tens
         start = int(items)
         stop = start + 1
 
-    # clone to break connection with Storage
-    return [(i, dataset[i][0].clone(), dataset[i][1]) for i in range(start, stop)]
+    return [(i, dataset[i][0], dataset[i][1]) for i in range(start, stop)]
 
 
 def idx_split(dataset, **kwargs):

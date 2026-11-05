@@ -2,7 +2,7 @@ import click
 import joblib
 
 import classerr.applications
-import classerr.optimization
+import classerr.experiment
 import classerr.solving
 import classerr.tree
 import classerr.utils
@@ -28,7 +28,8 @@ def main(experiment, dataset, run_name, reduction, bits, solver, items, jobs):
     with joblib.parallel_config(backend='loky', n_jobs=jobs), classerr.solving.solver_config(solver):
         match experiment:
             case 'quality' | 'quality-test':
-                print(f'reporting {model_orig.metric_name} on the {dataset}', 'TEST set' if experiment == 'quality-test' else 'dev set')
+                print(f'reporting {model_orig.metric_name} on the {dataset}',
+                      'TEST set' if experiment == 'quality-test' else 'dev set')
                 dataset_subset = data_split.test if experiment == 'quality-test' else data_split.dev
                 print(model_orig.metric_name, 'original', model_orig.quality(dataset_subset, data_split.metadata))
                 print(model_aprx.metric_name, 'approx  ', model_aprx.quality(dataset_subset, data_split.metadata))
@@ -39,7 +40,7 @@ def main(experiment, dataset, run_name, reduction, bits, solver, items, jobs):
 
                 if experiment == 'single':
                     i, point, target = samples_test[0]
-                    results = classerr.optimization.analyze_linear_region(
+                    results = classerr.experiment.single(
                         data_split.metadata, model_orig.layers, model_aprx.layers, point, target)
                     print(results)
 
