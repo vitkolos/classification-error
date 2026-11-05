@@ -13,3 +13,4 @@ def single(
 ):
     point_b = point.unsqueeze(0)  # single input -> batch (to support any PyTorch network)
     result = classerr.optimization.analyze_linear_region(metadata, model_orig, model_aprx, point, target)
+    return result

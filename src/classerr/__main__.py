@@ -40,9 +40,9 @@ def main(experiment, dataset, run_name, reduction, bits, solver, items, jobs):
 
                 if experiment == 'single':
                     i, point, target = samples_test[0]
-                    results = classerr.experiment.single(
+                    result = classerr.experiment.single(
                         data_split.metadata, model_orig.layers, model_aprx.layers, point, target)
-                    print(results)
+                    print(result)
 
             case 'tree':
                 tree = classerr.tree.build_tree(model_orig, data_split.dev)

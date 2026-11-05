@@ -14,8 +14,9 @@ class PolytopeResult:
     point_max_err: torch.Tensor
     pred_orig: torch.Tensor
     pred_aprx: torch.Tensor
-    mean_widths: list[float]
-    radii: list[float]
+    width_cor: float
+    widths_cls: list[float]
+    radii_cls: list[float]
 
 
 def analyze_linear_region(
@@ -27,14 +28,20 @@ def analyze_linear_region(
 ):
     lp_orig = lp_from_net(model_orig, metadata.bounds, point)
     lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
-    point_max_err = find_error_maximum(metadata, lp_orig, lp_aprx, point, target)
+    A_cor, b_cor = correct_polytope_constraints(lp_orig, lp_aprx, target)
+
+    point_max_err = find_error_maximum(metadata, A_cor, b_cor, lp_aprx, target)
+    point_max_err = point_max_err.reshape_as(point)
 
     with torch.no_grad():
         pred_orig = model_orig(point_max_err)
         pred_aprx = model_aprx(point_max_err)
 
-    mean_widths, radii = compute_classes_mean_widths(metadata, lp_orig, lp_aprx, target)
-    return PolytopeResult(point_max_err, pred_orig, pred_aprx, mean_widths, radii)
+    width_cor = polytope_widths(Polytope(metadata.bounds, A_cor, b_cor)).mean().item()
+
+    widths_cls, radii_cls = compute_classes_mean_widths(metadata, A_cor, b_cor, lp_aprx)
+
+    return PolytopeResult(point_max_err, pred_orig, pred_aprx, width_cor, widths_cls, radii_cls)
 
 
 def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
@@ -73,33 +80,30 @@ def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> Li
 
 
 def find_error_maximum(
-    metadata: Metadata, lp_orig: LinearProgram, lp_aprx: LinearProgram, point: torch.Tensor, target: int,
+    metadata: Metadata, A_cor: torch.Tensor, b_cor: torch.Tensor, lp_aprx: LinearProgram, target: int
 ) -> torch.Tensor:
-    A_ub, b_ub = correct_polytope_constraints(lp_orig, lp_aprx, target)
     results = []
 
     for k in range(metadata.num_classes):
         if k != target:
             objective, bias = objective_class_error(k, target, lp_aprx.objective, lp_aprx.bias)
-            lp = LinearProgram(metadata.bounds, A_ub, b_ub, objective, bias, maximize=True)
+            lp = LinearProgram(metadata.bounds, A_cor, b_cor, objective, bias, maximize=True)
             x, fun = classerr.solving.solve(lp)
             results.append((fun, k, x))
 
     fun_max, k_max, x_max = max(results)
-    x_max = x_max.reshape_as(point)
     return x_max
 
 
 def compute_classes_mean_widths(
-    metadata: Metadata, lp_orig: LinearProgram, lp_aprx: LinearProgram, target: int
+    metadata: Metadata, A_cor: torch.Tensor, b_cor: torch.Tensor, lp_aprx: LinearProgram
 ) -> tuple[list[float], list[float]]:
-    A_ub, b_ub = correct_polytope_constraints(lp_orig, lp_aprx, target)
     mean_widths = []
     radii = []
 
     for k in range(metadata.num_classes):
         A_cl, b_cl = constrain_class(k, lp_aprx.objective, lp_aprx.bias)
-        polytope = Polytope(metadata.bounds, torch.cat([A_ub, A_cl]), torch.cat([b_ub, b_cl]))
+        polytope = Polytope(metadata.bounds, torch.cat([A_cor, A_cl]), torch.cat([b_cor, b_cl]))
         mean_width = 0.0
         radius = chebyshev_radius(polytope)
 
@@ -150,9 +154,9 @@ def objective_class_error(
 
 
 def polytope_widths(
-    polytope: Polytope, num_directions: int = NUM_DIRECTIONS, cummulative_avg: bool = False, num_jobs: int = 1
+    polytope: Polytope, num_directions: int = NUM_DIRECTIONS, cumulative_avg: bool = False, num_jobs: int = 1
 ) -> torch.Tensor:
-    """returns widths of the polytope computed from many random directions (or the cummulative average in each step)"""
+    """returns widths of the polytope computed from many random directions (or the cumulative average in each step)"""
     # variables == dimensions
     num_variables = polytope.A_ub.shape[1]
     directions = torch.randn(num_directions, num_variables)
@@ -160,7 +164,7 @@ def polytope_widths(
     lp = LinearProgram(polytope.bounds, polytope.A_ub, polytope.b_ub, objective=torch.empty(0))
     results = classerr.solving.solve_parallel(lp, directions, num_jobs)
     widths = torch.tensor([(res_max.fun - res_min.fun) for res_min, res_max in results])
-    return widths if not cummulative_avg else widths.cumsum(dim=0) / torch.arange(1, num_directions+1)
+    return widths if not cumulative_avg else widths.cumsum(dim=0) / torch.arange(1, num_directions+1)
 
 
 def chebyshev_radius(polytope: Polytope) -> float:
