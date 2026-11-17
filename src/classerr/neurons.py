@@ -12,7 +12,7 @@ class Message:
     s_bias: torch.Tensor
 
     def __init__(self, point: torch.Tensor):
-        """'point' needs to be a single point (not a batch)"""
+        """'point' needs to be a single input (not a batch)"""
         self.point = point.unsqueeze(0)  # batch-like
         # create a unit matrix with a shape corresponding to the input
         self.s_weight = torch.eye(point.numel()).reshape((-1, *point.shape))

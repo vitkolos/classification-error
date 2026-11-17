@@ -1,23 +1,40 @@
-import torch
 import dataclasses
+import math
+import torch
 
 import classerr.neurons
+import classerr.hitandrun
 import classerr.solving
-from classerr.solving import Polytope, LinearProgram
+from classerr.solving import Polytope, LinearProgram, OptimizationResult, PolytopeHashable
+import classerr.utils
 from classerr.utils import Bounds, Metadata
 
 NUM_DIRECTIONS = 100
+MCMC_NUM_POINTS = 150
+MCMC_MAX_THIN = 2000
 
 
 @dataclasses.dataclass
 class PolytopeResult:
-    point_max_err: torch.Tensor
-    pred_orig: torch.Tensor
-    pred_aprx: torch.Tensor
-    width_cor: float
-    width_ext: float
-    widths_cls: list[float]
-    radii_cls: list[float]
+    point_max_err: torch.Tensor | None = None
+    pred_orig: torch.Tensor | None = None
+    pred_aprx: torch.Tensor | None = None
+    width: float | None = None
+    width_pt: torch.Tensor | None = None
+
+    # applicable for correct polytopes
+    widths_cls: list[float] | None = None
+    radii_cls: list[float] | None = None
+
+    # applicable for extended polytopes
+    num_polytopes: int | None = None
+    exploration: list[tuple[int, float]] | None = None
+
+
+class Subpolytopes:
+    def __init__(self):
+        self.polytopes: dict[PolytopeHashable, OptimizationResult] = {}
+        self.exploration: list[tuple[int, OptimizationResult]] = []
 
 
 def analyze_linear_region(
@@ -27,29 +44,18 @@ def analyze_linear_region(
     point: torch.Tensor,
     target: int,
 ):
+    """'point' needs to be a single input (not a batch)"""
     lp_orig = lp_from_net(model_orig, metadata.bounds, point)
     lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
-    A_cor, b_cor = correct_polytope_constraints(target, lp_orig, lp_aprx)
-    A_ext, b_ext = correct_polytope_constraints(target, lp_orig, lp_aprx=None)
+    spt = Subpolytopes()
 
-    # approach 1: linear multiclass margin loss
-    point_max_err = find_error_maximum(metadata, A_cor, b_cor, lp_aprx, target)
-    point_max_err = point_max_err.reshape_as(point)
-
-    with torch.no_grad():
-        pred_orig = model_orig(point_max_err)
-        pred_aprx = model_aprx(point_max_err)
-
-    width_cor = polytope_widths(Polytope(metadata.bounds, A_cor, b_cor)).mean().item()
-    width_ext = polytope_widths(Polytope(metadata.bounds, A_ext, b_ext)).mean().item()
+    result_correct = analyze_correct_polytope(metadata, model_orig, model_aprx, lp_orig, lp_aprx, point, target, spt)
+    result_extended = analyze_extended_polytope(metadata, model_orig, model_aprx, lp_orig, point, target, spt)
 
     # approach 2: cross-entropy loss
     ...
 
-    # approach 3: generalized accuracy
-    widths_cls, radii_cls = compute_classes_mean_widths(metadata, A_cor, b_cor, lp_aprx)
-
-    return PolytopeResult(point_max_err, pred_orig, pred_aprx, width_cor, width_ext, widths_cls, radii_cls)
+    return result_correct, result_extended
 
 
 def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
@@ -87,9 +93,75 @@ def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> Li
     )
 
 
+def analyze_correct_polytope(
+    metadata: Metadata,
+    model_orig: torch.nn.Module,
+    model_aprx: torch.nn.Module,
+    lp_orig: LinearProgram,
+    lp_aprx: LinearProgram,
+    point: torch.Tensor,
+    target: int,
+    spt: Subpolytopes,
+) -> PolytopeResult:
+    result = PolytopeResult()
+    A_cor, b_cor = correct_polytope_constraints(target, lp_orig, lp_aprx)
+    polytope_cor = Polytope(metadata.bounds, A_cor, b_cor)
+
+    result.width_pt = polytope_widths(polytope_cor)
+    result.width = result.width_pt.mean().item()
+
+    # approach 1: linear multiclass margin loss
+    max_err = find_error_maximum(metadata, A_cor, b_cor, lp_aprx, target)
+    result.point_max_err = max_err.x.reshape_as(point)
+
+    lp_correct_hashable = (lp_orig.to_polytope_hashable(), lp_aprx.to_polytope_hashable())
+    spt.polytopes[lp_correct_hashable] = max_err
+    spt.exploration.append((1, max_err))
+
+    with torch.no_grad():
+        input_b = result.point_max_err.unsqueeze(0)
+        result.pred_orig = model_orig(input_b)
+        result.pred_aprx = model_aprx(input_b)
+
+    # approach 3: generalized accuracy
+    result.widths_cls, result.radii_cls = compute_classes_mean_widths(metadata, A_cor, b_cor, lp_aprx)
+    return result
+
+
+def analyze_extended_polytope(
+    metadata: Metadata,
+    model_orig: torch.nn.Module,
+    model_aprx: torch.nn.Module,
+    lp_orig: LinearProgram,
+    point: torch.Tensor,
+    target: int,
+    spt: Subpolytopes,
+) -> PolytopeResult:
+    result = PolytopeResult()
+    A_ext, b_ext = correct_polytope_constraints(target, lp_orig, lp_aprx=None)
+    polytope_ext = Polytope(metadata.bounds, A_ext, b_ext)
+
+    result.width_pt = polytope_widths(polytope_ext)
+    result.width = result.width_pt.mean().item()
+
+    sampled_points = sample_points_in_polytope(polytope_ext, point)
+    subpolytopes_extend(spt, metadata, model_orig, model_aprx, sampled_points, target)
+    max_err = max(spt.polytopes.values(), key=lambda result: result.fun)
+    result.point_max_err = max_err.x.reshape_as(point)
+
+    with torch.no_grad():
+        input_b = result.point_max_err.unsqueeze(0)
+        result.pred_orig = model_orig(input_b)
+        result.pred_aprx = model_aprx(input_b)
+
+    result.num_polytopes = len(spt.polytopes)
+    result.exploration = [(n, res.fun) for n, res in spt.exploration]
+    return result
+
+
 def find_error_maximum(
     metadata: Metadata, A_cor: torch.Tensor, b_cor: torch.Tensor, lp_aprx: LinearProgram, target: int
-) -> torch.Tensor:
+) -> OptimizationResult:
     results = []
 
     for k in range(metadata.num_classes):
@@ -100,7 +172,7 @@ def find_error_maximum(
             results.append((fun, k, x))
 
     fun_max, k_max, x_max = max(results)
-    return x_max
+    return OptimizationResult(x_max, fun_max)
 
 
 def compute_classes_mean_widths(
@@ -178,6 +250,49 @@ def polytope_widths(
     results = classerr.solving.solve_parallel(lp, directions, num_jobs)
     widths = torch.tensor([(res_max.fun - res_min.fun) for res_min, res_max in results])
     return widths if not cumulative_avg else widths.cumsum(dim=0) / torch.arange(1, num_directions+1)
+
+
+def subpolytopes_extend(
+    spt: Subpolytopes,
+    metadata: Metadata,
+    model_orig: torch.nn.Module,
+    model_aprx: torch.nn.Module,
+    points: torch.Tensor,
+    target: int,
+    max_polytopes: int | None = None,
+):
+    for point in classerr.utils.progress(points):
+        # we construct the polytope and check if it has already been analyzed
+        lp_orig = lp_from_net(model_orig, metadata.bounds, point)
+        lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
+        A_cor, b_cor = correct_polytope_constraints(target, lp_orig, lp_aprx)
+        h = (lp_orig.to_polytope_hashable(), lp_aprx.to_polytope_hashable())
+
+        if h not in spt.polytopes:
+            spt.polytopes[h] = find_error_maximum(metadata, A_cor, b_cor, lp_aprx, target)
+
+        spt.exploration.append((len(spt.polytopes), spt.polytopes[h]))
+
+        if max_polytopes is not None and len(spt.polytopes) >= max_polytopes:
+            break
+
+
+def sample_points_in_polytope(
+    polytope: Polytope, point_initial: torch.Tensor, num_points: int = MCMC_NUM_POINTS, max_thin: int = MCMC_MAX_THIN
+) -> torch.Tensor:
+    A_full, b_full = polytope.get_full_constraints()
+    point_center, cheb_radius = chebyshev_center(A_full, b_full)
+    dim = point_center.numel()
+
+    lower = torch.from_numpy(polytope.bounds.lb)
+    upper = torch.from_numpy(polytope.bounds.ub)
+    max_half_extent = torch.maximum(upper - point_center, point_center - lower)
+    r_box_squared = torch.dot(max_half_extent, max_half_extent).item()
+
+    # heuristically increase thinning for narrow polytopes (we set thin = d * R^2 / r^2)
+    thin = min(max_thin, math.ceil(dim * r_box_squared / cheb_radius ** 2))
+    points = classerr.hitandrun.sample_points(A_full, b_full, point_center, num_iter=num_points * thin, thin=thin)
+    return points.reshape(-1, *point_initial.shape)
 
 
 def chebyshev_radius(polytope: Polytope) -> float:

@@ -4,8 +4,8 @@ import torch
 
 
 def sample_points(
-    A: torch.Tensor,
-    b: torch.Tensor,
+    A_ub: torch.Tensor,
+    b_ub: torch.Tensor,
     init: torch.Tensor,
     num_iter: int,
     burn_in: int = 0,
@@ -13,8 +13,10 @@ def sample_points(
     seed: int | None = None,
     tol: float = 1e-13,
 ) -> torch.Tensor:
-    A_np = np.ascontiguousarray(A.detach().cpu().numpy(), dtype=np.float64)
-    b_np = np.ascontiguousarray(b.detach().cpu().numpy(), dtype=np.float64)
+    """variable bounds must be included in the constraints so that the polytope is bounded; init has to be a single point (flattened)"""
+
+    A_np = np.ascontiguousarray(A_ub.detach().cpu().numpy(), dtype=np.float64)
+    b_np = np.ascontiguousarray(b_ub.detach().cpu().numpy(), dtype=np.float64)
     init_np = np.ascontiguousarray(init.detach().cpu().numpy(), dtype=np.float64)
     rng = np.random.default_rng(seed)
     raw_samples = _hitandrun_kernel(
