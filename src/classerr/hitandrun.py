@@ -1,76 +1,106 @@
+import numba as nb
+import numpy as np
 import torch
 
 
-@torch.inference_mode()
-def generate(
-    A_full: torch.Tensor,
-    b_full: torch.Tensor,
+def sample_points(
+    A: torch.Tensor,
+    b: torch.Tensor,
     init: torch.Tensor,
-    num_samples: int | None = None,
-    num_iter: int | None = None,
+    num_iter: int,
     burn_in: int = 0,
     thin: int = 1,
     seed: int | None = None,
-    epsilon: float = 1e-12
-):
-    """
-    a) takes shape [dim,] and returns shape [num_samples, dim], or
-    b) takes shape [chains, dim] and returns shape [num_samples, chains, dim]
-    """
-    single_point = init.ndim == 1
-    x = init.unsqueeze(0) if single_point else init
-    A_T = A_full.T
-
-    if num_iter is None and num_samples is not None:
-        num_iter = burn_in + num_samples * thin
-    elif num_samples is None and num_iter is not None:
-        num_samples = (num_iter - burn_in) // thin
-    else:
-        raise ValueError
-
-    samples = torch.empty((num_samples, *x.shape), dtype=x.dtype, device=x.device)
-    gen = torch.Generator(device=x.device)
-
-    if seed is not None:
-        gen.manual_seed(seed)
-
-    idx = 0
-
-    for i in range(1, num_iter + 1):
-        x = single_step(x, A_T, b_full, gen, epsilon)
-        if i > burn_in and (i - burn_in) % thin == 0:
-            samples[idx] = x
-            idx += 1
-
-    return samples.squeeze(1) if single_point else samples
-
-
-def single_step(
-    x: torch.Tensor, A_T: torch.Tensor, b: torch.Tensor, gen: torch.Generator, epsilon: float
+    tol: float = 1e-13,
 ) -> torch.Tensor:
-    # x: [chains, dim], A_T: [dim, constr], b: [constr,]
+    A_np = np.ascontiguousarray(A.detach().cpu().numpy(), dtype=np.float64)
+    b_np = np.ascontiguousarray(b.detach().cpu().numpy(), dtype=np.float64)
+    init_np = np.ascontiguousarray(init.detach().cpu().numpy(), dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    raw_samples = _hitandrun_kernel(
+        A_ub=A_np,
+        b_ub=b_np,
+        init=init_np,
+        num_iter=num_iter,
+        burn_in=burn_in,
+        thin=thin,
+        rng=rng,
+        tol=tol,
+    )
+    return torch.from_numpy(raw_samples).to(device=init.device, dtype=init.dtype)
 
-    # generate random directions on a unit sphere
-    u = torch.randn_like(x, generator=gen)
-    u /= torch.linalg.vector_norm(u, dim=1, keepdim=True)
 
-    # find ray-hyperplane intersections
-    numerator = b - (x @ A_T)
-    denominator = u @ A_T
+@nb.njit(inline='always')
+def _find_chord_bounds(
+    slack: np.ndarray,
+    projected_dir: np.ndarray,
+    tol: float,
+) -> tuple[float, float]:
+    lambda_min = -np.inf  # max M-
+    lambda_max = np.inf  # min M+
 
-    # prevent division by zero
-    den_pos = denominator > epsilon
-    den_neg = denominator < -epsilon
-    safe_den = torch.where(den_pos | den_neg, denominator, torch.ones_like(denominator))
-    Ms = numerator / safe_den
+    for i in range(slack.shape[0]):
+        rate = projected_dir[i]
 
-    lambda_min = torch.where(den_neg, Ms, float('-inf')).amax(dim=-1, keepdim=True)
-    lambda_max = torch.where(den_pos, Ms, float('inf')).amin(dim=-1, keepdim=True)
-    # clamp against minor boundary drift (ensure that lambda_min <= lambda_max)
-    lambda_min = torch.minimum(lambda_min, lambda_max)
+        if rate > tol:
+            # rate positive -> mu in M+
+            mu = slack[i] / rate
+            if mu < lambda_max:
+                lambda_max = mu
+        elif rate < -tol:
+            # rate negative -> mu in M-
+            mu = slack[i] / rate
+            if mu > lambda_min:
+                lambda_min = mu
+        else:
+            # rate zero -> cannot divide
+            pass
 
-    # uniformly sample from the interval
-    alpha = torch.rand((x.shape[0], 1), dtype=x.dtype, device=x.device, generator=gen)
-    lambda_ = lambda_min + alpha * (lambda_max - lambda_min)
+    # clamp against boundary drift
+    if lambda_min > lambda_max:
+        # it should hold that lambda_min <= 0 <= lambda_max
+        # so zero is a safe option
+        return 0.0, 0.0
 
-    return x + lambda_ * u
+    return lambda_min, lambda_max
+
+
+@nb.njit(cache=True)
+def _hitandrun_kernel(
+    A_ub: np.ndarray,
+    b_ub: np.ndarray,
+    init: np.ndarray,
+    num_iter: int,
+    burn_in: int,
+    thin: int,
+    rng: np.random.Generator,
+    tol: float,
+) -> np.ndarray:
+    dim = A_ub.shape[1]
+    x = init.copy()
+    slack = b_ub - (A_ub @ x)  # distance to each boundary hyperplane (non-negative)
+
+    num_samples = (num_iter - burn_in) // thin
+    samples = np.empty((num_samples, dim), dtype=np.float64)
+    sample_idx = 0
+
+    for step in range(1, num_iter + 1):
+        # random direction drawn from the unit sphere
+        u = rng.standard_normal(dim)
+        norm = np.linalg.norm(u)
+        u /= norm
+
+        projected_dir = A_ub @ u
+
+        lambda_min, lambda_max = _find_chord_bounds(slack, projected_dir, tol)
+        lambda_ = lambda_min + rng.random() * (lambda_max - lambda_min)
+
+        x += lambda_ * u
+        # update slack (without matrix-vector multiplication)
+        slack -= lambda_ * projected_dir
+
+        if step > burn_in and (step - burn_in) % thin == 0:
+            samples[sample_idx] = x
+            sample_idx += 1
+
+    return samples

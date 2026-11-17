@@ -13,7 +13,7 @@ def test_hitandrun_hypercube():
     b = torch.ones(2 * dim)
     init = torch.zeros(dim)
 
-    chain = classerr.hitandrun.generate(A, b, init, num_samples=20000, thin=5, burn_in=2000, seed=42)
+    chain = classerr.hitandrun.sample_points(A, b, init, num_iter=20000*5, thin=5, burn_in=2000, seed=42)
 
     assert torch.all(A @ chain.T <= b[:, None] + 1e-11), "samples escaped polytope"
 
