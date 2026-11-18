@@ -39,28 +39,6 @@ class Subpolytopes:
         self.radii_cls: list = []
 
 
-def analyze_linear_region(
-    metadata: Metadata,
-    model_orig: torch.nn.Module,
-    model_aprx: torch.nn.Module,
-    point: torch.Tensor,
-    target: int,
-):
-    """'point' needs to be a single input (not a batch)"""
-    lp_orig = lp_from_net(model_orig, metadata.bounds, point)
-    lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
-    spt = Subpolytopes()
-
-    result_sub = analyze_polytope_sub(metadata, model_orig, model_aprx, lp_orig, lp_aprx, point, target, spt)
-    result_ext = analyze_polytope_ext(metadata, model_orig, model_aprx, lp_orig,
-                                      point, target, spt, compute_widths=True)
-
-    # approach 2: cross-entropy loss
-    ...
-
-    return result_sub, result_ext
-
-
 def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
     """'point' needs to be a single input (not a batch)"""
     constraints = classerr.neurons.Constraints()
@@ -94,6 +72,14 @@ def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> Li
         maximize=True,
         neuron_states=constraints.neuron_states
     )
+
+
+def analyze_point(model_orig: torch.nn.Module, model_aprx: torch.nn.Module, point: torch.Tensor) -> PolytopeResult:
+    with torch.no_grad():
+        input_b = point.unsqueeze(0)
+        pred_orig = model_orig(input_b)
+        pred_aprx = model_aprx(input_b)
+    return PolytopeResult(point, pred_orig, pred_aprx)
 
 
 def analyze_polytope_sub(

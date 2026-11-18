@@ -15,7 +15,9 @@ import sklearn.utils
 DIR_DATA_RAW = Path("data/raw")
 DIR_DATA_PROCESSED = Path("data/processed")
 DIR_MODELS = Path("models")
-DIR_OUTPUTS = Path("outputs")
+DIR_OUTPUTS = Path("outputs/raw")
+DIR_REPORTS = Path("outputs/reports")
+DIR_FIGURES = Path("outputs/figures")
 
 
 class Bounds:

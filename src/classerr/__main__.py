@@ -43,6 +43,10 @@ def main(experiment, dataset, run_name, reduction, bits, solver, items, jobs):
                     result = classerr.experiment.single(
                         data_split.metadata, model_orig.layers, model_aprx.layers, point, target)
                     print(result)
+                elif experiment == 'batch':
+                    directory = classerr.utils.DIR_OUTPUTS / dataset / run_name
+                    classerr.experiment.run_batch(directory, data_split.metadata,
+                                                  model_orig.layers, model_aprx.layers, samples_test, jobs)
 
             case 'tree':
                 tree = classerr.tree.build_tree(model_orig, data_split.dev)
