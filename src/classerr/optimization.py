@@ -22,9 +22,9 @@ class PolytopeResult:
     width: float | None = None
     width_pt: torch.Tensor | None = None
 
-    # applicable for correct polytopes
-    widths_cls: list[float] | None = None
-    radii_cls: list[float] | None = None
+    # 1D or 2D lists
+    widths_cls: list | None = None
+    radii_cls: list | None = None
 
     # applicable for extended polytopes
     num_polytopes: int | None = None
@@ -35,6 +35,8 @@ class Subpolytopes:
     def __init__(self):
         self.polytopes: dict[PolytopeHashable, OptimizationResult] = {}
         self.exploration: list[tuple[int, OptimizationResult]] = []
+        self.widths_cls: list = []
+        self.radii_cls: list = []
 
 
 def analyze_linear_region(
@@ -49,13 +51,14 @@ def analyze_linear_region(
     lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
     spt = Subpolytopes()
 
-    result_correct = analyze_correct_polytope(metadata, model_orig, model_aprx, lp_orig, lp_aprx, point, target, spt)
-    result_extended = analyze_extended_polytope(metadata, model_orig, model_aprx, lp_orig, point, target, spt)
+    result_sub = analyze_polytope_sub(metadata, model_orig, model_aprx, lp_orig, lp_aprx, point, target, spt)
+    result_ext = analyze_polytope_ext(metadata, model_orig, model_aprx, lp_orig,
+                                      point, target, spt, compute_widths=True)
 
     # approach 2: cross-entropy loss
     ...
 
-    return result_correct, result_extended
+    return result_sub, result_ext
 
 
 def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> LinearProgram:
@@ -93,7 +96,7 @@ def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> Li
     )
 
 
-def analyze_correct_polytope(
+def analyze_polytope_sub(
     metadata: Metadata,
     model_orig: torch.nn.Module,
     model_aprx: torch.nn.Module,
@@ -104,31 +107,36 @@ def analyze_correct_polytope(
     spt: Subpolytopes,
 ) -> PolytopeResult:
     result = PolytopeResult()
-    A_cor, b_cor = correct_polytope_constraints(target, lp_orig, lp_aprx)
-    polytope_cor = Polytope(metadata.bounds, A_cor, b_cor)
+    A_sub, b_sub = correct_polytope_constraints(target, lp_orig, lp_aprx)
+    polytope_sub = Polytope(metadata.bounds, A_sub, b_sub)
 
-    result.width_pt = polytope_widths(polytope_cor)
+    result.width_pt = polytope_widths(polytope_sub)
     result.width = result.width_pt.mean().item()
 
     # approach 1: linear multiclass margin loss
-    max_err = find_error_maximum(metadata, A_cor, b_cor, lp_aprx, target)
+    max_err = find_error_maximum(metadata, A_sub, b_sub, lp_aprx, target)
     result.point_max_err = max_err.x.reshape_as(point)
 
-    lp_correct_hashable = (lp_orig.to_polytope_hashable(), lp_aprx.to_polytope_hashable())
-    spt.polytopes[lp_correct_hashable] = max_err
-    spt.exploration.append((1, max_err))
+    # approach 3: generalized accuracy
+    result.widths_cls, result.radii_cls = compute_classes_mean_widths(metadata, A_sub, b_sub, lp_aprx)
 
+    # initialize the exploration of the extended polytope
+    lp_sub_hashable = (lp_orig.to_polytope_hashable(), lp_aprx.to_polytope_hashable())
+    spt.polytopes[lp_sub_hashable] = max_err
+    spt.exploration.append((1, max_err))
+    spt.widths_cls.append(result.widths_cls)
+    spt.radii_cls.append(result.radii_cls)
+
+    # perform predictions
     with torch.no_grad():
         input_b = result.point_max_err.unsqueeze(0)
         result.pred_orig = model_orig(input_b)
         result.pred_aprx = model_aprx(input_b)
 
-    # approach 3: generalized accuracy
-    result.widths_cls, result.radii_cls = compute_classes_mean_widths(metadata, A_cor, b_cor, lp_aprx)
     return result
 
 
-def analyze_extended_polytope(
+def analyze_polytope_ext(
     metadata: Metadata,
     model_orig: torch.nn.Module,
     model_aprx: torch.nn.Module,
@@ -136,6 +144,7 @@ def analyze_extended_polytope(
     point: torch.Tensor,
     target: int,
     spt: Subpolytopes,
+    compute_widths: bool,
 ) -> PolytopeResult:
     result = PolytopeResult()
     A_ext, b_ext = correct_polytope_constraints(target, lp_orig, lp_aprx=None)
@@ -145,7 +154,7 @@ def analyze_extended_polytope(
     result.width = result.width_pt.mean().item()
 
     sampled_points = sample_points_in_polytope(polytope_ext, point)
-    subpolytopes_extend(spt, metadata, model_orig, model_aprx, sampled_points, target)
+    subpolytopes_extend(spt, metadata, model_orig, model_aprx, sampled_points, target, compute_widths)
     max_err = max(spt.polytopes.values(), key=lambda result: result.fun)
     result.point_max_err = max_err.x.reshape_as(point)
 
@@ -154,6 +163,8 @@ def analyze_extended_polytope(
         result.pred_orig = model_orig(input_b)
         result.pred_aprx = model_aprx(input_b)
 
+    result.widths_cls = spt.widths_cls
+    result.radii_cls = spt.radii_cls
     result.num_polytopes = len(spt.polytopes)
     result.exploration = [(n, res.fun) for n, res in spt.exploration]
     return result
@@ -259,17 +270,23 @@ def subpolytopes_extend(
     model_aprx: torch.nn.Module,
     points: torch.Tensor,
     target: int,
+    compute_widths: bool,
     max_polytopes: int | None = None,
 ):
     for point in classerr.utils.progress(points):
         # we construct the polytope and check if it has already been analyzed
         lp_orig = lp_from_net(model_orig, metadata.bounds, point)
         lp_aprx = lp_from_net(model_aprx, metadata.bounds, point)
-        A_cor, b_cor = correct_polytope_constraints(target, lp_orig, lp_aprx)
+        A_sub, b_sub = correct_polytope_constraints(target, lp_orig, lp_aprx)
         h = (lp_orig.to_polytope_hashable(), lp_aprx.to_polytope_hashable())
 
         if h not in spt.polytopes:
-            spt.polytopes[h] = find_error_maximum(metadata, A_cor, b_cor, lp_aprx, target)
+            spt.polytopes[h] = find_error_maximum(metadata, A_sub, b_sub, lp_aprx, target)
+
+            if compute_widths:
+                widths_cls, radii_cls = compute_classes_mean_widths(metadata, A_sub, b_sub, lp_aprx)
+                spt.widths_cls.append(widths_cls)
+                spt.radii_cls.append(radii_cls)
 
         spt.exploration.append((len(spt.polytopes), spt.polytopes[h]))
 
