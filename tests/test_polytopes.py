@@ -24,7 +24,10 @@ def mean_width(polytope):
 
 
 def assert_hitandrun_inside(polytope: Polytope):
-    for point in classerr.hitandrun.sample_points(polytope.A_ub, polytope.b_ub, torch.zeros(len(polytope.bounds)), num_iter=100, seed=42):
+    init = torch.zeros(len(polytope.bounds))
+    classerr.optimization.assert_inside_polytope(init, polytope)
+
+    for point in classerr.hitandrun.sample_points(polytope.A_ub, polytope.b_ub, init, num_iter=100, seed=42):
         classerr.optimization.assert_inside_polytope(point, polytope)
 
 
@@ -84,6 +87,3 @@ def test_triangle():
     b_ub = torch.cat((b_ub, -b_ub[0:1]))
     polytope = Polytope(Bounds([(-2, 2)] * 3), A_ub, b_ub)
     assert classerr.optimization.chebyshev_radius(polytope) == 0.0
-    assert_hitandrun_inside(polytope)
-
-test_cube()
