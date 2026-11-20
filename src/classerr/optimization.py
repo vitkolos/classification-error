@@ -236,12 +236,17 @@ def objective_class_error(
 
 
 def polytope_widths(
-    polytope: Polytope, num_directions: int = NUM_DIRECTIONS, cumulative_avg: bool = False, num_jobs: int = 1
+    polytope: Polytope,
+    num_directions: int = NUM_DIRECTIONS,
+    seed: int | torch.Generator | None = None,
+    cumulative_avg: bool = False,
+    num_jobs: int = 1,
 ) -> torch.Tensor:
     """returns widths of the polytope computed from many random directions (or the cumulative average in each step)"""
+    generator = torch.Generator().manual_seed(seed) if isinstance(seed, int) else seed
     # variables == dimensions
     num_variables = polytope.A_ub.shape[1]
-    directions = torch.randn(num_directions, num_variables)
+    directions = torch.randn(num_directions, num_variables, generator=generator)
     directions /= torch.linalg.vector_norm(directions, dim=1, keepdim=True)
     lp = LinearProgram(polytope.bounds, polytope.A_ub, polytope.b_ub, objective=torch.empty(0))
     results = classerr.solving.solve_parallel(lp, directions, num_jobs)

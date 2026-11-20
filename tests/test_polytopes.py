@@ -3,6 +3,8 @@ import torch
 import scipy
 
 import classerr.optimization
+import classerr.hitandrun
+from classerr.solving import Polytope
 from classerr.utils import Bounds
 
 ABS_TOL_WIDTH = 0.05
@@ -14,11 +16,16 @@ def vertices_to_H(vertices):
     hull = scipy.spatial.ConvexHull(vertices)
     A_ub = hull.equations[:, :-1]  # normals
     b_ub = -hull.equations[:, -1]  # offsets
-    return torch.from_numpy(A_ub), torch.from_numpy(b_ub)
+    return torch.from_numpy(A_ub).to(dtype=torch.get_default_dtype()), torch.from_numpy(b_ub).to(dtype=torch.get_default_dtype())
 
 
 def mean_width(polytope):
-    return classerr.optimization.polytope_widths(polytope).mean().item()
+    return classerr.optimization.polytope_widths(polytope, seed=42).mean().item()
+
+
+def assert_hitandrun_inside(polytope: Polytope):
+    for point in classerr.hitandrun.sample_points(polytope.A_ub, polytope.b_ub, torch.zeros(len(polytope.bounds)), num_iter=100, seed=42):
+        classerr.optimization.assert_inside_polytope(point, polytope)
 
 
 def test_cube():
@@ -28,10 +35,12 @@ def test_cube():
         for y in [-1, 1]
         for z in [-1, 1]
     ]
-    polytope = classerr.optimization.Polytope(Bounds([(-2, 2)] * 3), *vertices_to_H(vertices))
+    polytope = Polytope(Bounds([(-2, 2)] * 3), *vertices_to_H(vertices))
     torch.testing.assert_close(mean_width(polytope), expected=3.0, atol=ABS_TOL_WIDTH, rtol=0)
+    print(mean_width(polytope))
     radius = classerr.optimization.chebyshev_radius(polytope)
     torch.testing.assert_close(radius, expected=1.0, atol=ABS_TOL_RADIUS, rtol=0)
+    assert_hitandrun_inside(polytope)
 
 
 def test_tetrahedron():
@@ -41,10 +50,11 @@ def test_tetrahedron():
         [-1,  1, -1],
         [-1, -1,  1],
     ]
-    polytope = classerr.optimization.Polytope(Bounds([(-2, 2)] * 3), *vertices_to_H(vertices))
+    polytope = Polytope(Bounds([(-2, 2)] * 3), *vertices_to_H(vertices))
     torch.testing.assert_close(mean_width(polytope), expected=2.58, atol=ABS_TOL_WIDTH, rtol=0)
     radius = classerr.optimization.chebyshev_radius(polytope)
     torch.testing.assert_close(radius, expected=1/math.sqrt(3), atol=ABS_TOL_RADIUS, rtol=0)
+    assert_hitandrun_inside(polytope)
 
 
 def test_octahedron():
@@ -53,10 +63,11 @@ def test_octahedron():
         [0,  1,  0], [0, -1,  0],
         [0,  0,  1], [0,  0, -1]
     ]
-    polytope = classerr.optimization.Polytope(Bounds([(-2, 2)] * 3), *vertices_to_H(vertices))
+    polytope = Polytope(Bounds([(-2, 2)] * 3), *vertices_to_H(vertices))
     torch.testing.assert_close(mean_width(polytope), expected=1.66, atol=ABS_TOL_WIDTH, rtol=0)
     radius = classerr.optimization.chebyshev_radius(polytope)
     torch.testing.assert_close(radius, expected=1/math.sqrt(3), atol=ABS_TOL_RADIUS, rtol=0)
+    assert_hitandrun_inside(polytope)
 
 
 def test_triangle():
@@ -71,5 +82,8 @@ def test_triangle():
     # add another inequality to reduce the dimensionality of the polytope
     A_ub = torch.cat((A_ub, -A_ub[0:1]))
     b_ub = torch.cat((b_ub, -b_ub[0:1]))
-    polytope = classerr.optimization.Polytope(Bounds([(-2, 2)] * 3), A_ub, b_ub)
+    polytope = Polytope(Bounds([(-2, 2)] * 3), A_ub, b_ub)
     assert classerr.optimization.chebyshev_radius(polytope) == 0.0
+    assert_hitandrun_inside(polytope)
+
+test_cube()
