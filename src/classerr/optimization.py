@@ -1,5 +1,4 @@
 import dataclasses
-import math
 import torch
 
 import classerr.neurons
@@ -11,7 +10,6 @@ from classerr.utils import Bounds, Metadata
 
 NUM_DIRECTIONS = 100
 MCMC_NUM_POINTS = 150
-MCMC_MAX_THIN = 2000
 
 
 @dataclasses.dataclass
@@ -286,20 +284,13 @@ def subpolytopes_extend(
 
 
 def sample_points_in_polytope(
-    polytope: Polytope, point_initial: torch.Tensor, num_points: int = MCMC_NUM_POINTS, max_thin: int = MCMC_MAX_THIN
+    polytope: Polytope, point_initial: torch.Tensor, num_points: int = MCMC_NUM_POINTS
 ) -> torch.Tensor:
     A_full, b_full = polytope.get_full_constraints()
-    point_center, cheb_radius = chebyshev_center(A_full, b_full)
-    dim = point_center.numel()
-
-    lower = torch.from_numpy(polytope.bounds.lb)
-    upper = torch.from_numpy(polytope.bounds.ub)
-    max_half_extent = torch.maximum(upper - point_center, point_center - lower)
-    r_box_squared = torch.dot(max_half_extent, max_half_extent).item()
-
-    # heuristically increase thinning for narrow polytopes (we set thin = d * R^2 / r^2)
-    thin = min(max_thin, math.ceil(dim * r_box_squared / cheb_radius ** 2))
-    points = classerr.hitandrun.sample_points(A_full, b_full, point_center, num_iter=num_points * thin, thin=thin)
+    # we stick to the "purest" form of MCMC Hit-and-Run
+    init = point_initial
+    thin = 1
+    points = classerr.hitandrun.sample_points(A_full, b_full, init, num_iter=num_points * thin, thin=thin)
     return points.reshape(-1, *point_initial.shape)
 
 
