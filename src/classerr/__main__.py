@@ -11,7 +11,7 @@ import classerr.utils
 @click.command()
 @click.argument('experiment')
 @click.argument('dataset')
-@click.option('-n', '--run-name', default='', help='Choose a fitting name for the run (~ model variant).')
+@click.option('-n', '--run-name', default='run', help='Choose a fitting name for the run (~ model variant).')
 @click.option('-r', '--reduction', default='asymmetric', help='Kind of reduction/approximation/quantization.')
 @click.option('-b', '--bits', default=8, help='Number of bits used by the quantized network (default: 8).')
 @click.option('-s', '--solver', default=classerr.solving.SOLVER_DEFAULT, help='Best options: gurobi, gurobi-barrier, highs (default).')

@@ -89,6 +89,7 @@ def analyze_polytope_sub(
     point: torch.Tensor,
     target: int,
     spt: Subpolytopes,
+    generalized_acc_widths: bool,
 ) -> PolytopeResult:
     result = PolytopeResult()
     A_sub, b_sub = correct_polytope_constraints(target, lp_orig, lp_aprx)
@@ -102,7 +103,8 @@ def analyze_polytope_sub(
     result.point_max_err = max_err.x.reshape_as(point)
 
     # approach 3: generalized accuracy
-    result.widths_cls, result.radii_cls = compute_classes_mean_widths(metadata, A_sub, b_sub, lp_aprx)
+    if generalized_acc_widths:
+        result.widths_cls, result.radii_cls = compute_classes_mean_widths(metadata, A_sub, b_sub, lp_aprx)
 
     # initialize the exploration of the extended polytope
     lp_sub_hashable = (lp_orig.to_polytope_hashable(), lp_aprx.to_polytope_hashable())
@@ -128,7 +130,7 @@ def analyze_polytope_ext(
     point: torch.Tensor,
     target: int,
     spt: Subpolytopes,
-    compute_widths: bool,
+    generalized_acc_widths: bool,
 ) -> PolytopeResult:
     result = PolytopeResult()
     A_ext, b_ext = correct_polytope_constraints(target, lp_orig, lp_aprx=None)
@@ -138,7 +140,7 @@ def analyze_polytope_ext(
     result.width = result.width_pt.mean().item()
 
     sampled_points = sample_points_in_polytope(polytope_ext, point)
-    subpolytopes_extend(spt, metadata, model_orig, model_aprx, sampled_points, target, compute_widths)
+    subpolytopes_extend(spt, metadata, model_orig, model_aprx, sampled_points, target, generalized_acc_widths)
     max_err = max(spt.polytopes.values(), key=lambda result: result.fun)
     result.point_max_err = max_err.x.reshape_as(point)
 

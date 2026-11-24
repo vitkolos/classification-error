@@ -102,6 +102,7 @@ def single(
     model_aprx: torch.nn.Module,
     point: torch.Tensor,
     target: int,
+    generalized_acc_widths: bool = False,
 ) -> dict[str, opt.PolytopeResult]:
     """'point' needs to be a single input (not a batch)"""
     lp_orig = opt.lp_from_net(model_orig, metadata.bounds, point)
@@ -109,8 +110,9 @@ def single(
     spt = opt.Subpolytopes()
 
     result_point = opt.analyze_point(model_orig, model_aprx, point)
-    result_sub = opt.analyze_polytope_sub(metadata, model_orig, model_aprx, lp_orig, lp_aprx, point, target, spt)
+    result_sub = opt.analyze_polytope_sub(metadata, model_orig, model_aprx, lp_orig,
+                                          lp_aprx, point, target, spt, generalized_acc_widths)
     result_ext = opt.analyze_polytope_ext(metadata, model_orig, model_aprx, lp_orig,
-                                          point, target, spt, compute_widths=True)
+                                          point, target, spt, generalized_acc_widths)
 
     return {'result_point': result_point, 'result_sub': result_sub, 'result_ext': result_ext}
