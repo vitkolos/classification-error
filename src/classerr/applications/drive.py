@@ -38,7 +38,7 @@ class DriveDataset(classerr.utils.Dataset):
         return self.data.shape[0]
 
     def __getitem__(self, index):
-        return self.data[index], self.target[index]
+        return self.data[index], int(self.target[index])
 
 
 class DriveSplit(classerr.utils.DataSplit):

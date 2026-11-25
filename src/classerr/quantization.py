@@ -66,7 +66,7 @@ class QuantizerAsymmetric(Quantizer):
         q_number = torch.round(number / self.scale + self.zero_point)
         q_number = torch.clamp(q_number, self.a, self.b)
 
-        # convert back to float64
+        # convert back to float
         return self.scale * (q_number - self.zero_point)
 
 
@@ -86,5 +86,5 @@ class QuantizerSymmetric(Quantizer):
         q_number = torch.round(number / self.scale)
         q_number = torch.clamp(q_number, self.a, self.b)
 
-        # convert back to float64
+        # convert back to float
         return self.scale * q_number

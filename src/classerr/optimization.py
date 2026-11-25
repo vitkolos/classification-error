@@ -28,6 +28,12 @@ class PolytopeResult:
     num_polytopes: int | None = None
     exploration: list[tuple[int, float]] | None = None
 
+    def predict(self, model_orig: torch.nn.Module, model_aprx: torch.nn.Module):
+        with torch.no_grad():
+            input_b = self.point_max_err.unsqueeze(0)
+            self.pred_orig = model_orig(input_b).squeeze(0)
+            self.pred_aprx = model_aprx(input_b).squeeze(0)
+
 
 class Subpolytopes:
     def __init__(self):
@@ -73,11 +79,9 @@ def lp_from_net(net: torch.nn.Module, bounds: Bounds, point: torch.Tensor) -> Li
 
 
 def analyze_point(model_orig: torch.nn.Module, model_aprx: torch.nn.Module, point: torch.Tensor) -> PolytopeResult:
-    with torch.no_grad():
-        input_b = point.unsqueeze(0)
-        pred_orig = model_orig(input_b)
-        pred_aprx = model_aprx(input_b)
-    return PolytopeResult(point, pred_orig, pred_aprx)
+    result = PolytopeResult(point)
+    result.predict(model_orig, model_aprx)
+    return result
 
 
 def analyze_polytope_sub(
@@ -101,6 +105,7 @@ def analyze_polytope_sub(
     # approach 1: linear multiclass margin loss
     max_err = find_error_maximum(metadata, A_sub, b_sub, lp_aprx, target)
     result.point_max_err = max_err.x.reshape_as(point)
+    result.predict(model_orig, model_aprx)
 
     # approach 3: generalized accuracy
     if generalized_acc_widths:
@@ -112,12 +117,6 @@ def analyze_polytope_sub(
     spt.exploration.append((1, max_err))
     spt.widths_cls.append(result.widths_cls)
     spt.radii_cls.append(result.radii_cls)
-
-    # perform predictions
-    with torch.no_grad():
-        input_b = result.point_max_err.unsqueeze(0)
-        result.pred_orig = model_orig(input_b)
-        result.pred_aprx = model_aprx(input_b)
 
     return result
 
@@ -143,11 +142,7 @@ def analyze_polytope_ext(
     subpolytopes_extend(spt, metadata, model_orig, model_aprx, sampled_points, target, generalized_acc_widths)
     max_err = max(spt.polytopes.values(), key=lambda result: result.fun)
     result.point_max_err = max_err.x.reshape_as(point)
-
-    with torch.no_grad():
-        input_b = result.point_max_err.unsqueeze(0)
-        result.pred_orig = model_orig(input_b)
-        result.pred_aprx = model_aprx(input_b)
+    result.predict(model_orig, model_aprx)
 
     result.widths_cls = spt.widths_cls
     result.radii_cls = spt.radii_cls

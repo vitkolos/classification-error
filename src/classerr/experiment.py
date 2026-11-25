@@ -70,6 +70,7 @@ def batch_step(
 
     data: dict[str, Any] = {}
     data['sample_index'] = sample_index
+    data['target'] = target
     data['date'] = str(datetime.datetime.now())
 
     start_time = time.time()
