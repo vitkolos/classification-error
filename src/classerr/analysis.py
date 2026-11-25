@@ -1,10 +1,18 @@
 import torch
-import numpy as np
 import polars as pl
+
+COMPLEX_TYPES = (dict, str, list, torch.Tensor)
+
+
+def unwrap_dict(source: dict, target: dict, prefix: str = ''):
+    for k, v in source.items():
+        if not isinstance(v, COMPLEX_TYPES) and v is not None:
+            target[f'{prefix}{k}'] = v
 
 
 def individual_metrics(item: dict) -> dict:
     metrics = {}
+    unwrap_dict(item, metrics)
 
     for scope in ['point', 'sub', 'ext']:
         m = {}
@@ -17,28 +25,24 @@ def individual_metrics(item: dict) -> dict:
         for k, v in m.items():
             metrics[f'{scope}_{k}'] = v.item()
 
+        unwrap_dict(r, metrics, prefix=f'{scope}_')
+
     return metrics
 
 
 def describe(df_results: pl.DataFrame) -> pl.DataFrame:
-    described = df_results.describe(percentiles=[0.5])
-    weighted = {}
-    polytope_widths = df_results.get('polytope_width')
-    union_widths = df_results.get('union_width')
+    pairs = {
+        'error_sample': 'polytope_width',
+        'error_nearby': 'polytope_width',
+        'union_error': 'union_width',
+    }
 
-    def compute_weighted_average(column, weights, sum_only=False):
-        if weights is not None and weights.sum() > 0 and not df_results[column].isna().any():
-            if sum_only:
-                weighted[column] = df_results[column].sum() / weights.sum()
-            else:
-                weighted[column] = np.average(df_results[column], weights=weights)
+    exprs = {'statistic': pl.lit('weighted')}
+    for col, w in pairs.items():
+        if col in df_results.columns and w in df_results.columns:
+            exprs[col] = (pl.col(col) * pl.col(w)).sum() / pl.col(w).sum()
 
-    compute_weighted_average('error_sample', polytope_widths)
-    compute_weighted_average('error_nearby', polytope_widths)
-    compute_weighted_average('integral', polytope_widths, sum_only=True)  # integrals are already "weighted"
-    compute_weighted_average('union_error', union_widths)
-
-    if weighted:
-        described.loc['weighted'] = pl.Series(weighted)
-
-    return described
+    return pl.concat(
+        [df_results.describe(percentiles=(0.5,)), df_results.select(exprs)],
+        how='diagonal_relaxed',
+    )
