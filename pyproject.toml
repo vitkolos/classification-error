@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.5.0",
+    "great-tables>=1.2.0",
     "gurobipy>=13.0.3",
     "joblib>=1.6.0",
     "matplotlib>=3.11.2",

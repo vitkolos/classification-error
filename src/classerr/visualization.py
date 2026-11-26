@@ -33,32 +33,26 @@ def main(visualization, dataset, run_ids, fresh_metadata):
     match visualization:
         case 'results':
             for run_id in run_ids:
-                show_results(dataset_path / run_id)
+                show_results(dataset, run_id)
 
         case _:
             raise NotImplementedError(f'{visualization} not implemented')
 
 
 TEX_ALIASES = {
-    'sample_max': r'E_T',
-    'sample_mean': r'\overline{E}_T',
-    'nearby_max': r'E_{\Xi_T}',
-    'nearby_mean': r'\overline{E}_{\Xi_T}',
-    'nearby_weighted_sum': r'\overline{E}^{\widetilde d}_{\Xi_T}',
-    'integral_divided_sum': r'\overline{E}^{\widetilde d}_{\Xi_T^E}',
-    'error_sample': r'E(x)',
-    'error_nearby': r'E_{\Xi_x}',
-    'polytope_width': r'\tilde d_n(\Xi_x)',
-    'weight': r'\frac{\tilde d_n(\Xi_x)}{S}',
-    'nearby_weighted': r'\frac{\tilde d_n(\Xi_x)}{S} E_{\Xi_x}',
-    'integral_width': r'\tilde d_{n+1}(\Xi_x^E)',
-    'integral_divided': r'\tilde d_{n+1}(\Xi_x^E)\over S',
-    'union_max': r'E_{\overline{\Xi}_T}',
-    'union_mean': r'\overline{E}_{\overline{\Xi}_T}',
-    'union_weighted_sum': r'\overline{E}^{\widetilde d}_{\overline{\Xi}_T}',
+    'point_accuracy_mean': r'\alpha_T',
+    'point_retention_mean': r'\overline{y}_T',
+    'sub_accuracy_mean': r'\alpha_{\Xi_T}',
+    'sub_retention_mean': r'\overline{y}_{\Xi_T}',
+    'sub_accuracy_weighted': r'\alpha_{\Xi_T}^{\widetilde d}',
+    'sub_retention_weighted': r'\overline{y}_{\Xi_T}^{\widetilde d}',
+    'ext_accuracy_weighted': r'\alpha_{\overline{\Xi}_{T_P}}^{\widetilde d}',
+    'ext_retention_weighted': r'\overline{y}_{\overline{\Xi}_{T_P}}^{\widetilde d}',
+    'sub_generalized_accuracy': r'\gamma_T',
+    'ext_generalized_accuracy': r'\gamma_{T_P}',
 }
 
-LABEL_ALIASES = {
+LABEL_ALIASES: dict = {
 }
 
 
@@ -84,23 +78,15 @@ def load_scaling(dataset: str, experiment_path: Path, fresh_metadata: bool) -> f
     return metadata_dict['error_scaling']
 
 
-def analyze_results(directory: Path) -> tuple[pl.DataFrame, dict]:
+def load_results(directory: Path) -> pl.DataFrame:
     """loads the plain results (experiment output) into a DataFrame"""
     results = classerr.experiment.load_batch_results(directory)
-    df = pl.DataFrame(classerr.analysis.individual_stats(r) for r in results)
-    described = classerr.analysis.describe(df)
-    stats = classerr.analysis.described_to_stats(described)
-    stats |= classerr.analysis.generalized_accuracy(results)
-    breakpoint()
-    return df, stats
+    return classerr.analysis.results_list_to_df(results)
 
 
-def wrap_html_tables(tables, into_one=True):
+def wrap_html_tables(tables):
     """wraps HTML tables so that the output looks as a nice webpage (which supports KaTeX)"""
     html = ''.join(tables)
-
-    if into_one:
-        html = '<table>' + re.sub(r'</?table.*?>', '', html) + '</table>'
 
     for column, alias in TEX_ALIASES.items():
         html = html.replace(f'>{column}</th>', f'>\\( {alias} \\)<small>{to_display_label(column)}</small></th>')
@@ -114,8 +100,24 @@ def wrap_html_tables(tables, into_one=True):
     return f'<!doctype html><html><head>{katex}<style>{style}</style></head><body>{html}</body></html>'
 
 
-def show_results(directory: Path):
-    print(analyze_results(directory))
+def show_results(dataset_name: str, run_id: str):
+    results = load_results(classerr.utils.DIR_OUTPUTS / dataset_name / run_id)
+    described = classerr.analysis.describe(results)
+    stats = classerr.analysis.get_stats(results)
+
+    reports_dir = classerr.utils.DIR_REPORTS / dataset_name / run_id
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    results.write_csv(reports_dir / 'results.csv')
+    described.write_csv(reports_dir / 'described.csv')
+
+    with open(reports_dir / f'stats.json', 'w') as file_json:
+        json.dump(stats, file_json, indent=4)
+
+    df = pl.DataFrame([{'run': run_id, **stats}])
+    html_table = df.style.fmt_number(columns=pl.selectors.float(), decimals=5).as_raw_html()
+
+    with open(reports_dir / "comparison.html", "w") as f:
+        f.write(wrap_html_tables([html_table]))
 
 
 if __name__ == '__main__':
