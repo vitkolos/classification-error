@@ -68,6 +68,7 @@ class Metadata:
 
     def to_dict(self) -> dict:
         return {
+            'num_classes': self.num_classes,
             'error_scaling': self.error_scaling,
             'bounds': getattr(self.bounds, 'seq', None),
             'scales': getattr(self.scaler, 'scale_', np.empty(0)).tolist(),

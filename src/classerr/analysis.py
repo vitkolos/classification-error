@@ -19,7 +19,10 @@ def individual_stats(item: dict) -> dict:
         r = item[f'result_{scope}']
         target = item['target']
 
-        m['correct'] = torch.isclose(r['pred_aprx'][target], r['pred_aprx'].amax(), atol=1e-6)
+        max_pred_aprx = r['pred_aprx'].amax()
+        m['correct'] = torch.isclose(r['pred_aprx'][target], max_pred_aprx, rtol=1e-7, atol=1e-9)
+        m['correct_dist'] = max_pred_aprx - r['pred_aprx'][target]
+
         m['retention'] = r['pred_aprx'][target] / r['pred_orig'][target]
 
         for k, v in m.items():
@@ -65,7 +68,23 @@ def described_to_stats(described: pl.DataFrame) -> dict:
 
 def generalized_accuracy(results_list: list[dict]) -> dict[str, float]:
     stats: dict[str, float] = {}
-    # TODO
+    min_radius = float('inf')
+    sub_widths_correct = 0.0
+    sub_widths_all = 0.0
+    ext_widths_correct = 0.0
+    ext_widths_all = 0.0
+
+    # def _process_subpolytope(radii, widths, target):
+    #     num_classes = len(radii)
+    #     width_sum =
+
+    #     for c in range(num_classes):
+    #         if radii[c] > 0.0:
+
+    # for item in results_list:
+    #     radii = item['result_sub']['radii_cls']
+    #     widths = item['result_sub']['widths_cls']
+
     stats['sub_generalized'] = -1.0
     stats['ext_generalized'] = -1.0
     return stats
