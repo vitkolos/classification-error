@@ -10,9 +10,9 @@ def unwrap_dict(source: dict, target: dict, prefix: str = ''):
             target[f'{prefix}{k}'] = v
 
 
-def individual_metrics(item: dict) -> dict:
-    metrics = {}
-    unwrap_dict(item, metrics)
+def individual_stats(item: dict) -> dict:
+    stats: dict = {}
+    unwrap_dict(item, stats)
 
     for scope in ['point', 'sub', 'ext']:
         m = {}
@@ -23,26 +23,49 @@ def individual_metrics(item: dict) -> dict:
         m['retention'] = r['pred_aprx'][target] / r['pred_orig'][target]
 
         for k, v in m.items():
-            metrics[f'{scope}_{k}'] = v.item()
+            stats[f'{scope}_{k}'] = v.item()
 
-        unwrap_dict(r, metrics, prefix=f'{scope}_')
+        unwrap_dict(r, stats, prefix=f'{scope}_')
 
-    return metrics
+    return stats
 
 
-def describe(df_results: pl.DataFrame) -> pl.DataFrame:
+def describe(results: pl.DataFrame) -> pl.DataFrame:
     pairs = {
-        'error_sample': 'polytope_width',
-        'error_nearby': 'polytope_width',
-        'union_error': 'union_width',
+        'sub_correct': 'sub_width',
+        'sub_retention': 'sub_width',
+        'ext_correct': 'ext_width',
+        'ext_retention': 'ext_width',
     }
-
     exprs = {'statistic': pl.lit('weighted')}
+
     for col, w in pairs.items():
-        if col in df_results.columns and w in df_results.columns:
+        if col in results.columns and w in results.columns:
             exprs[col] = (pl.col(col) * pl.col(w)).sum() / pl.col(w).sum()
 
     return pl.concat(
-        [df_results.describe(percentiles=(0.5,)), df_results.select(exprs)],
+        [results.describe(percentiles=(0.5,)), results.select(**exprs)],
         how='diagonal_relaxed',
     )
+
+
+def described_to_stats(described: pl.DataFrame) -> dict:
+    stats = {row['statistic']: row for row in described.to_dicts()}
+    return {
+        'point_accuracy_mean': stats['mean']['point_correct'],
+        'point_retention_mean': stats['mean']['point_retention'],
+        'sub_accuracy_mean': stats['mean']['sub_correct'],
+        'sub_retention_mean': stats['mean']['sub_retention'],
+        'sub_accuracy_weighted': stats['weighted']['sub_correct'],
+        'sub_retention_weighted': stats['weighted']['sub_retention'],
+        'ext_accuracy_weighted': stats['weighted']['ext_correct'],
+        'ext_retention_weighted': stats['weighted']['ext_retention'],
+    }
+
+
+def generalized_accuracy(results_list: list[dict]) -> dict[str, float]:
+    stats: dict[str, float] = {}
+    # TODO
+    stats['sub_generalized'] = -1.0
+    stats['ext_generalized'] = -1.0
+    return stats

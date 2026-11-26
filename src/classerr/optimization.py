@@ -1,4 +1,5 @@
 import dataclasses
+from typing import Any
 import torch
 
 import classerr.neurons
@@ -29,6 +30,8 @@ class PolytopeResult:
     exploration: list[tuple[int, float]] | None = None
 
     def predict(self, model_orig: torch.nn.Module, model_aprx: torch.nn.Module):
+        assert self.point_max_err is not None
+
         with torch.no_grad():
             input_b = self.point_max_err.unsqueeze(0)
             self.pred_orig = model_orig(input_b).squeeze(0)
@@ -36,8 +39,8 @@ class PolytopeResult:
 
 
 class Subpolytopes:
-    def __init__(self):
-        self.polytopes: dict[PolytopeHashable, OptimizationResult] = {}
+    def __init__(self) -> None:
+        self.polytopes: dict[Any, OptimizationResult] = {}
         self.exploration: list[tuple[int, OptimizationResult]] = []
         self.widths_cls: list = []
         self.radii_cls: list = []

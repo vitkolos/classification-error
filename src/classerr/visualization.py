@@ -35,9 +35,6 @@ def main(visualization, dataset, run_ids, fresh_metadata):
             for run_id in run_ids:
                 show_results(dataset_path / run_id)
 
-        case 'comparison':
-            compare_results(dataset_path, run_ids, error_scaling)
-
         case _:
             raise NotImplementedError(f'{visualization} not implemented')
 
@@ -61,14 +58,7 @@ TEX_ALIASES = {
     'union_weighted_sum': r'\overline{E}^{\widetilde d}_{\overline{\Xi}_T}',
 }
 
-NETS = {
-    'california': 1,
-    'year': 2,
-    'utkface': 3,
-}
-
 LABEL_ALIASES = {
-    'union_width': 'extended polytope width',
 }
 
 
@@ -94,27 +84,15 @@ def load_scaling(dataset: str, experiment_path: Path, fresh_metadata: bool) -> f
     return metadata_dict['error_scaling']
 
 
-def load_df_results(directory: Path) -> pl.DataFrame:
+def analyze_results(directory: Path) -> tuple[pl.DataFrame, dict]:
     """loads the plain results (experiment output) into a DataFrame"""
     results = classerr.experiment.load_batch_results(directory)
-    df = pl.DataFrame(classerr.analysis.individual_metrics(r) for r in results)
-    return df
-
-
-# def extract_metrics(df_results: pl.DataFrame):
-#     """extracts our metrics from a DataFrame containing plain results"""
-#     described = classerr.analysis.describe(df_results)
-#     return {
-#         'sample_max': described.loc['max', 'error_sample'],
-#         'sample_mean': described.loc['mean', 'error_sample'],
-#         'nearby_max': described.loc['max', 'error_nearby'],
-#         'nearby_mean': described.loc['mean', 'error_nearby'],
-#         'nearby_weighted_sum': described.loc['weighted', 'error_nearby'],
-#         'integral_divided_sum': described.loc['weighted', 'integral'],
-#         'union_max': described.loc['max', 'union_error'],
-#         'union_mean': described.loc['mean', 'union_error'],
-#         'union_weighted_sum': described.loc['weighted', 'union_error'],
-#     }
+    df = pl.DataFrame(classerr.analysis.individual_stats(r) for r in results)
+    described = classerr.analysis.describe(df)
+    stats = classerr.analysis.described_to_stats(described)
+    stats |= classerr.analysis.generalized_accuracy(results)
+    breakpoint()
+    return df, stats
 
 
 def wrap_html_tables(tables, into_one=True):
@@ -137,35 +115,7 @@ def wrap_html_tables(tables, into_one=True):
 
 
 def show_results(directory: Path):
-    df_results = load_df_results(directory)
-    # metrics = extract_metrics(df_results)
-    breakpoint()
-    metrics = classerr.analysis.describe(df_results)
-    print(metrics)
-
-
-def compare_results(experiment_path: Path, run_ids: list[str], error_scaling: float):
-    """writes nice tables containing the metrics and comparing them between runs"""
-    dfs = {run_id: load_df_results(experiment_path / run_id) for run_id in run_ids}
-
-    def analyze(name: str, df_results: pl.DataFrame):
-        df_results.loc[:, classerr.experiment.UNSCALED_COLS] *= error_scaling
-        net_index = NETS.get(experiment_path.name, experiment_path.name[0])
-        bits = ''.join(char for char in name if char.isdigit()) or name[0]  # hack to extract bits from run_id
-        return {
-            'run': r' \( \boldsymbol{\widetilde{\mathcal{N}}_' + str(net_index) + '^{' + bits + '}} \\)',
-            **extract_metrics(df_results),
-        }
-
-    df = pl.DataFrame(analyze(*item) for item in dfs.items())
-
-    FMT = '{:.5f}'.format  # precision
-
-    target_dir = experiment_path / 'common_outputs'
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(target_dir / 'comparison.html', 'w') as f:
-        f.write(wrap_html_tables([df.to_html(float_format=FMT)]))
+    print(analyze_results(directory))
 
 
 if __name__ == '__main__':
