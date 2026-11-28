@@ -1,4 +1,5 @@
 import sys
+import collections
 from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
@@ -39,7 +40,7 @@ class Metadata:
     bounds: Bounds = None  # type: ignore[assignment]
     num_classes: int = 0  # zero for regression
     scaler: Any = None
-    error_scaling: float = 1.0
+    error_scaling: float = 1.0  # used if the regression target is rescaled
     sl_data: slice = field(default_factory=lambda: slice(1, None))
     sl_target: slice = field(default_factory=lambda: slice(0, 1))
 
@@ -106,6 +107,15 @@ def get_samples(dataset: Dataset, items: str = '') -> list[tuple[int, torch.Tens
         stop = start + 1
 
     return [(i, dataset[i][0], dataset[i][1]) for i in range(start, stop)]
+
+
+def get_majority_class(dataset: Dataset) -> tuple[int, float]:
+    ds_len = len_ds(dataset)
+    targets = [int(dataset[i][1]) for i in range(ds_len)]
+    counts = collections.Counter(targets)
+    maj_class, count = counts.most_common(1)[0]
+    frequency = count / ds_len
+    return maj_class, frequency
 
 
 def idx_split(dataset, **kwargs):

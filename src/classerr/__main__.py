@@ -28,11 +28,18 @@ def main(experiment, dataset, run_name, reduction, bits, solver, items, jobs):
     with joblib.parallel_config(backend='loky', n_jobs=jobs), classerr.solving.solver_config(solver):
         match experiment:
             case 'quality' | 'quality-test':
+                print(
+                    f"train size = {len(data_split.train)}, dev size = {len(data_split.dev)}, test size = {len(data_split.test)}")
+                print(data_split.metadata.num_classes, "classes")
+
                 print(f'reporting {model_orig.metric_name} on the {dataset}',
                       'TEST set' if experiment == 'quality-test' else 'dev set')
                 dataset_subset = data_split.test if experiment == 'quality-test' else data_split.dev
                 print(model_orig.metric_name, 'original', model_orig.quality(dataset_subset, data_split.metadata))
                 print(model_aprx.metric_name, 'approx  ', model_aprx.quality(dataset_subset, data_split.metadata))
+
+                maj_class, frequency = classerr.utils.get_majority_class(dataset_subset)
+                print(f"majority class {maj_class}, frequency {frequency}")
 
             case 'single' | 'batch':
                 dataset_subset = model_orig.subset(data_split.test, data_split.metadata.is_classification)
